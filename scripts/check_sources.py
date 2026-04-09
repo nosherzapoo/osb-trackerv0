@@ -172,9 +172,19 @@ def main():
         sys.exit(0)
 
     # Stage 2: Check source URLs for changes (parallel)
+    # Weekly states always run - their source pages don't change when new data drops
     changed = []
+    hash_check_states = []
+    for sc in states_to_check:
+        freq = STATE_REGISTRY.get(sc, {}).get('frequency', 'monthly')
+        if freq == 'weekly':
+            changed.append(sc)
+            print(f"  {sc}: weekly reporter, always run")
+        else:
+            hash_check_states.append(sc)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(fetch_source_hash, sc): sc for sc in states_to_check}
+        futures = {executor.submit(fetch_source_hash, sc): sc for sc in hash_check_states}
         for future in concurrent.futures.as_completed(futures):
             sc = futures[future]
             new_hash = future.result()
