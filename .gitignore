@@ -7,3 +7,4 @@ data/raw/
 logs/
 dashboard/dist/
 research/screenshots/
+data/processed/*.csv.bak
