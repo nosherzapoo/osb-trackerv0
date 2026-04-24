@@ -349,18 +349,37 @@ class BaseStateScraper(ABC):
 
         combined = pd.concat(all_data, ignore_index=True)
 
-        # If weekly-reporting state, also compute monthly aggregations
+        processed_dir = Path("data/processed")
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        output_path = processed_dir / f"{self.state_code}.csv"
+
+        # Merge with existing history unless this is a full backfill rebuild.
+        # _validate_full_dataset handles dedup (keep='last' preserves new rows).
+        if not backfill and output_path.exists():
+            try:
+                existing = pd.read_csv(output_path, low_memory=False)
+                # Drop prior monthly aggregations — they'll be regenerated below
+                if 'source_file' in existing.columns:
+                    existing = existing[existing['source_file'] != 'aggregated_from_weekly']
+                combined = pd.concat([existing, combined], ignore_index=True)
+            except Exception as e:
+                self.logger.warning(f"Could not merge with existing CSV: {e}")
+
+        # If weekly-reporting state, recompute monthly aggregations from the full dataset
         if self.config.get('frequency') == 'weekly':
             monthly = self._aggregate_to_monthly(combined)
             if not monthly.empty:
                 combined = pd.concat([combined, monthly], ignore_index=True)
 
+        # Normalize date columns to YYYY-MM-DD strings — merges between existing
+        # CSV (string dates) and freshly-parsed data (pandas datetime) otherwise
+        # produce mixed formats which break downstream date-keyed lookups.
+        for col in ('period_start', 'period_end'):
+            if col in combined.columns:
+                combined[col] = pd.to_datetime(combined[col], errors='coerce').dt.strftime('%Y-%m-%d')
+
         self._validate_full_dataset(combined)
 
-        # Save processed CSV
-        processed_dir = Path("data/processed")
-        processed_dir.mkdir(parents=True, exist_ok=True)
-        output_path = processed_dir / f"{self.state_code}.csv"
         combined.to_csv(output_path, index=False)
         self.logger.info(f"Saved {len(combined)} rows to {output_path}")
 
@@ -537,8 +556,12 @@ class BaseStateScraper(ABC):
         if weekly.empty:
             return pd.DataFrame(columns=STANDARD_COLUMNS)
 
-        weekly['period_start'] = pd.to_datetime(weekly['period_start'])
-        weekly['period_end'] = pd.to_datetime(weekly['period_end'])
+        weekly['period_start'] = pd.to_datetime(weekly['period_start'], errors='coerce')
+        weekly['period_end'] = pd.to_datetime(weekly['period_end'], errors='coerce')
+        # Drop rows with unparseable dates — to_period() below would crash on NaT
+        weekly = weekly[weekly['period_start'].notna() & weekly['period_end'].notna()]
+        if weekly.empty:
+            return pd.DataFrame(columns=STANDARD_COLUMNS)
 
         sum_cols = [c for c in MONEY_COLUMNS if c in weekly.columns and weekly[c].notna().any()]
 
