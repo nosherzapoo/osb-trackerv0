@@ -86,12 +86,14 @@ class NYScraper(BaseStateScraper):
             self._page = None
 
     def _download_excel(self, url_path: str, filename: str) -> Path:
-        """Download an Excel file from NY gaming site using Playwright."""
+        """Download an Excel/PDF file from NY gaming site using Playwright."""
         self._init_browser()
         save_path = self.raw_dir / filename
 
-        if save_path.exists() and save_path.stat().st_size > 1000:
-            self.logger.info(f"  Already downloaded: {filename}")
+        # NY publishes "live" PDFs at fixed URLs whose contents are appended
+        # weekly. Use the base helper which expires cached files after 12h.
+        if not self._should_redownload(save_path):
+            self.logger.info(f"  Already downloaded (recent): {filename}")
             return save_path
 
         try:
