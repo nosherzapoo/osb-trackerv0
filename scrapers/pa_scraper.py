@@ -88,13 +88,32 @@ class PAScraper(BaseStateScraper):
         return None
 
     def download_report(self, period_info: dict) -> Path:
-        """Download the FY Excel file."""
+        """Download the FY Excel file.
+
+        PA serves one Excel per fiscal year; the *current* FY's file gets new months
+        appended through the year (live URL). Older FYs are immutable. Re-download
+        the current FY daily; cache older FYs forever.
+        """
         url = period_info["download_url"]
         fy_name = period_info["fy_name"]
         filename = f"PA_{fy_name}.xlsx"
         save_path = self.raw_dir / filename
 
-        if save_path.exists() and save_path.stat().st_size > 1000:
+        # Parse FY range from name like "FY2025-2026" — current PA fiscal year ends Jun 30.
+        from datetime import date
+        is_current_fy = False
+        m = re.search(r'(\d{4})-(\d{4})', fy_name)
+        if m:
+            fy_end_year = int(m.group(2))
+            today = date.today()
+            current_fy_end = fy_end_year if today.month >= 7 else fy_end_year
+            # FY runs Jul 1 of (end_year-1) through Jun 30 of end_year
+            fy_end = date(fy_end_year, 6, 30)
+            fy_start = date(fy_end_year - 1, 7, 1)
+            is_current_fy = fy_start <= today <= fy_end
+
+        cached_ok = save_path.exists() and save_path.stat().st_size > 1000
+        if cached_ok and (not is_current_fy or not self._should_redownload(save_path, max_age_hours=12)):
             self.logger.info(f"  Already downloaded: {filename}")
             return save_path
 

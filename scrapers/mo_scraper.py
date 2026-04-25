@@ -20,7 +20,13 @@ from bs4 import BeautifulSoup
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scrapers.base_scraper import BaseStateScraper
-from scrapers.scraper_utils import setup_logger, fetch_with_retry, download_file
+from scrapers.scraper_utils import (
+    setup_logger,
+    fetch_with_retry,
+    download_file,
+    fetch_html_stealth,
+    download_file_stealth,
+)
 
 MO_BASE_URL = "https://www.mgc.dps.mo.gov/SportsWagering/sw_financials/"
 MO_INDEX_URL = MO_BASE_URL + "rb_SWFin_main.html"
@@ -50,9 +56,11 @@ class MOScraper(BaseStateScraper):
         """Discover Monthly Financials files from the MO gaming page."""
         periods = []
 
+        # MO IIS WAF blocks plain HTTP to /SportsWagering/ from datacenter IPs.
+        # Stealth Playwright + reload-after-cookies is required to reach the index.
         try:
-            resp = fetch_with_retry(MO_INDEX_URL)
-            soup = BeautifulSoup(resp.text, "html.parser")
+            html = fetch_html_stealth(MO_INDEX_URL, reload_after_cookies=True)
+            soup = BeautifulSoup(html, "html.parser")
         except Exception as e:
             self.logger.error(f"Failed to fetch MO index page: {e}")
             return periods
@@ -100,8 +108,20 @@ class MOScraper(BaseStateScraper):
         filename = url.split("/")[-1].replace("%20", "_").replace(" ", "_")
         save_path = self.raw_dir / filename
 
-        if not (save_path.exists() and save_path.stat().st_size > 1000):
-            download_file(url, save_path)
+        # Re-fetch the most recent file in case the regulator revises it.
+        # Encode the period from the filename (e.g. "..._0126.xlsx" -> Jan 2026);
+        # if we can't, treat as in-window to be safe.
+        in_revision_window = self._is_recent(filename)
+
+        def _fresh_enough(p: Path) -> bool:
+            if not p.exists() or p.stat().st_size <= 1000:
+                return False
+            if in_revision_window:
+                return not self._should_redownload(p, max_age_hours=12)
+            return True
+
+        if not _fresh_enough(save_path):
+            download_file_stealth(url, save_path, warmup_url=MO_INDEX_URL)
             self.logger.info(f"  Downloaded: {filename} ({save_path.stat().st_size:,} bytes)")
 
         # Also download Revenue Detail if available
@@ -109,12 +129,26 @@ class MOScraper(BaseStateScraper):
         if detail_url:
             detail_filename = detail_url.split("/")[-1].replace("%20", "_").replace(" ", "_")
             detail_path = self.raw_dir / detail_filename
-            if not (detail_path.exists() and detail_path.stat().st_size > 1000):
-                download_file(detail_url, detail_path)
+            if not _fresh_enough(detail_path):
+                download_file_stealth(detail_url, detail_path, warmup_url=MO_INDEX_URL)
                 self.logger.info(f"  Downloaded: {detail_filename}")
             period_info["_revenue_detail_path"] = str(detail_path)
 
         return save_path
+
+    def _is_recent(self, filename: str) -> bool:
+        """Detect whether a MO filename refers to a period in the 90-day revision window."""
+        from datetime import date
+        m = re.search(r'(\d{2})(\d{2})\.', filename)  # _MMYY before extension
+        if not m:
+            return True  # Unknown format — be safe
+        try:
+            mm = int(m.group(1))
+            yy = 2000 + int(m.group(2))
+            period = date(yy, mm, 1)
+            return (date.today() - period).days < 90
+        except Exception:
+            return True
 
     def parse_report(self, file_path: Path, period_info: dict) -> pd.DataFrame:
         """Parse MO Monthly Financials + Revenue Detail for operator data."""

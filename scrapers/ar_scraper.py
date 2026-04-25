@@ -27,13 +27,16 @@ from datetime import date, datetime
 
 import pandas as pd
 import pdfplumber
-import requests
 from bs4 import BeautifulSoup
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scrapers.base_scraper import BaseStateScraper
-from scrapers.scraper_utils import setup_logger
+from scrapers.scraper_utils import (
+    setup_logger,
+    fetch_html_stealth,
+    download_file_stealth,
+)
 
 AR_INDEX_URL = (
     "https://www.dfa.arkansas.gov/office/taxes/excise-tax-administration/"
@@ -67,10 +70,12 @@ class ARScraper(BaseStateScraper):
         periods = []
         seen_urls = set()
 
-        # Scrape index page for PDF links
+        # AR DFA is behind Cloudflare with aggressive bot detection —
+        # plain HTTP returns 403 even from residential IPs. patchright + real Chrome
+        # is required to reach the page.
         try:
-            resp = requests.get(AR_INDEX_URL, headers=HEADERS, timeout=30)
-            soup = BeautifulSoup(resp.text, "html.parser")
+            html = fetch_html_stealth(AR_INDEX_URL, use_patchright=True)
+            soup = BeautifulSoup(html, "html.parser")
 
             for link in soup.find_all("a", href=True):
                 href = link["href"]
@@ -127,12 +132,10 @@ class ARScraper(BaseStateScraper):
         if not self._should_redownload(save_path):
             return save_path
 
-        resp = requests.get(url, headers=HEADERS, timeout=60)
-        if resp.status_code != 200:
-            raise FileNotFoundError(f"AR PDF not found: {url} (status {resp.status_code})")
-
-        with open(save_path, "wb") as f:
-            f.write(resp.content)
+        try:
+            download_file_stealth(url, save_path, use_patchright=True, warmup_url=AR_INDEX_URL)
+        except Exception as e:
+            raise FileNotFoundError(f"AR PDF not found: {url} ({e})")
 
         self.logger.info(f"  Downloaded: {filename} ({save_path.stat().st_size:,} bytes)")
         return save_path

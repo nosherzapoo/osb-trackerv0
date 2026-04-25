@@ -226,15 +226,18 @@ class WYScraper(BaseStateScraper):
         filename = f"WY_{year}_{month:02d}.pdf"
         save_path = self.raw_dir / filename
 
-        # Return cached file if it looks valid
+        # Recent reports may be revised — re-download anything from the last 90 days.
+        from datetime import date
+        in_revision_window = (date.today() - date(year, month, 1)).days < 90
+
+        # Return cached file if it looks valid AND not in the revision window
         if save_path.exists() and save_path.stat().st_size > 1000:
-            # Quick check: does it start with %PDF?
             with open(save_path, "rb") as f:
                 header = f.read(5)
-            if header.startswith(b"%PDF"):
-                return save_path
-            else:
+            if not header.startswith(b"%PDF"):
                 save_path.unlink()
+            elif not in_revision_window or not self._should_redownload(save_path, max_age_hours=12):
+                return save_path
 
         file_id = period_info.get("google_drive_file_id")
         if not file_id:

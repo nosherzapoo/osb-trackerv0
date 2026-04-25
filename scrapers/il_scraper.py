@@ -148,10 +148,22 @@ class ILScraper(BaseStateScraper):
         month = period_info["month"]
         month_name = period_info["month_name"]
 
-        # Check if all files already exist
+        # Recent periods may still receive revisions from the regulator —
+        # re-download files in a 90-day revision window. Older months are immutable.
+        from datetime import date
+        period_age_days = (date.today() - date(year, month, 1)).days
+        in_revision_window = period_age_days < 90
+
+        def _is_cached(p):
+            if not p.exists() or p.stat().st_size <= 50:
+                return False
+            if in_revision_window:
+                return not self._should_redownload(p, max_age_hours=12)
+            return True
+
+        # Check if all files already exist (and are fresh enough)
         all_exist = all(
-            self._report_path(year, month, rt["key"]).exists()
-            and self._report_path(year, month, rt["key"]).stat().st_size > 50
+            _is_cached(self._report_path(year, month, rt["key"]))
             for rt in REPORT_TYPES
         )
         if all_exist:
@@ -160,7 +172,7 @@ class ILScraper(BaseStateScraper):
         # Download each report type
         for rt in REPORT_TYPES:
             save_path = self._report_path(year, month, rt["key"])
-            if save_path.exists() and save_path.stat().st_size > 50:
+            if _is_cached(save_path):
                 continue
 
             self._fetch_tokens()

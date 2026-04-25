@@ -216,10 +216,20 @@ class MEScraper(BaseStateScraper):
 
         save_path = self.raw_dir / filename
 
-        # Use cached file if it exists and is non-trivial
+        # Re-download recent reports in case the regulator revises numbers.
+        # Anything older than 90 days is treated as immutable.
+        period_end = period_info.get("period_end")
+        in_revision_window = False
+        if period_end is not None:
+            from datetime import date
+            pe = period_end if isinstance(period_end, date) else None
+            if pe and (date.today() - pe).days < 90:
+                in_revision_window = True
+
         if save_path.exists() and save_path.stat().st_size > 500:
-            self.logger.info(f"  Cached: {filename}")
-            return save_path
+            if not in_revision_window or not self._should_redownload(save_path, max_age_hours=12):
+                self.logger.info(f"  Cached: {filename}")
+                return save_path
 
         try:
             resp = self._session.get(url, timeout=60)

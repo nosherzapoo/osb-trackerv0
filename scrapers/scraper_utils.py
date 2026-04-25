@@ -132,6 +132,120 @@ def download_file(url: str, save_path: Path, timeout: int = 60) -> Path:
     return save_path
 
 
+def _stealth_init_script() -> str:
+    """JS to mask headless/automation fingerprints. No-op for patchright (patches internally)."""
+    return """
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+        Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+        window.chrome = {runtime: {}};
+    """
+
+
+def _open_stealth_context(use_patchright: bool = False):
+    """Launch a Playwright browser + context tuned to evade bot detection.
+    Returns (playwright, browser, context). Caller must close browser and stop playwright.
+    use_patchright=True uses the patchright fork + real Chrome (for aggressive WAFs)."""
+    stealth_ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    if use_patchright:
+        from patchright.sync_api import sync_playwright as _pw_start
+        pw = _pw_start().start()
+        browser = pw.chromium.launch(headless=True, channel="chrome", args=["--no-sandbox"])
+    else:
+        from playwright.sync_api import sync_playwright as _pw_start
+        pw = _pw_start().start()
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        )
+    context = browser.new_context(
+        user_agent=stealth_ua,
+        viewport={"width": 1920, "height": 1080},
+        locale="en-US",
+        timezone_id="America/Chicago",
+        accept_downloads=True,
+    )
+    if not use_patchright:
+        context.add_init_script(_stealth_init_script())
+    return pw, browser, context
+
+
+def fetch_html_stealth(url: str, use_patchright: bool = False,
+                       reload_after_cookies: bool = False,
+                       warmup_url: str | None = None,
+                       wait_ms: int = 2000) -> str:
+    """Fetch an HTML page via a stealth browser (returns raw HTML).
+
+    warmup_url: if set, visit this URL first to establish session cookies.
+    reload_after_cookies: reload the target after initial load (defeats some CF challenges).
+    """
+    pw, browser, context = _open_stealth_context(use_patchright=use_patchright)
+    try:
+        page = context.new_page()
+        if warmup_url:
+            page.goto(warmup_url, timeout=45000, wait_until="networkidle")
+            page.wait_for_timeout(wait_ms)
+        resp = page.goto(url, timeout=45000, wait_until="networkidle")
+        if reload_after_cookies:
+            page.wait_for_timeout(wait_ms)
+            resp = page.reload(wait_until="networkidle", timeout=30000)
+        if resp and resp.status >= 400:
+            raise RuntimeError(f"Stealth fetch {url} returned {resp.status}")
+        return page.content()
+    finally:
+        browser.close()
+        pw.stop()
+
+
+_FETCH_AS_BYTES_JS = """
+async (url) => {
+    const r = await fetch(url, {credentials: 'include'});
+    if (!r.ok) return {ok: false, status: r.status};
+    const buf = await r.arrayBuffer();
+    const arr = new Uint8Array(buf);
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < arr.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, arr.subarray(i, i + chunk));
+    }
+    return {ok: true, data: btoa(binary)};
+}
+"""
+
+
+def download_file_stealth(url: str, save_path: Path, use_patchright: bool = False,
+                          warmup_url: str | None = None, wait_ms: int = 2000) -> Path:
+    """Download a file via in-page fetch (uses Chrome's TLS/HTTP stack + cookies).
+
+    Works for PDFs, XLSX, etc. Chrome's built-in PDF viewer would otherwise intercept
+    direct navigation, so we fetch via JS and receive the raw bytes."""
+    import base64
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    pw, browser, context = _open_stealth_context(use_patchright=use_patchright)
+    try:
+        page = context.new_page()
+        # Warmup visits the referring page so cookies/fingerprint match a real user
+        warmup = warmup_url or url
+        # If URL is a file, warmup_url is required; otherwise fallback to url's origin
+        if warmup == url:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            warmup = f"{parsed.scheme}://{parsed.netloc}/"
+        page.goto(warmup, timeout=45000, wait_until="networkidle")
+        page.wait_for_timeout(wait_ms)
+
+        result = page.evaluate(_FETCH_AS_BYTES_JS, url)
+        if not result.get("ok"):
+            raise RuntimeError(f"Stealth download {url} returned {result.get('status')}")
+        save_path.write_bytes(base64.b64decode(result["data"]))
+        return save_path
+    finally:
+        browser.close()
+        pw.stop()
+
+
 def download_with_playwright(url: str, save_dir: Path, timeout: int = 30000) -> Path:
     """
     Download a file that requires browser interaction.
