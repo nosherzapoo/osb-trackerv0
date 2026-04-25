@@ -161,6 +161,13 @@ class KYScraper(BaseStateScraper):
 
         result = pd.concat([result, tableau_df], ignore_index=True)
 
+        # Normalize date columns to YYYY-MM-DD (the Tableau path produces
+        # pandas datetimes which would otherwise mix with the string dates
+        # already in the CSV from the PDF path).
+        for col in ('period_start', 'period_end'):
+            if col in result.columns:
+                result[col] = pd.to_datetime(result[col], errors='coerce').dt.strftime('%Y-%m-%d')
+
         # Re-save
         processed_dir = Path("data/processed")
         output_path = processed_dir / f"{self.state_code}.csv"
@@ -226,8 +233,11 @@ class KYScraper(BaseStateScraper):
                         f"&MONTH(Reporting%20Period)={m}"
                     )
                     try:
-                        page.goto(url, wait_until="networkidle", timeout=30000)
-                        page.wait_for_timeout(3000)  # let viz render
+                        # Tableau Public has constant background polling so
+                        # 'networkidle' rarely fires within budget. Wait for DOM
+                        # then give the viz extra time to paint.
+                        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                        page.wait_for_timeout(8000)  # let viz render
                         page.screenshot(path=str(png_path), full_page=True)
                         self.logger.info(f"  Captured: {png_path.name}")
 

@@ -26,9 +26,13 @@ from scrapers.scraper_utils import setup_logger
 
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 
-# Hardcoded PDF URLs by year — these are the Revenue Breakdown PDFs
-PDF_URLS = {
-    2026: "https://nrgc.nebraska.gov/sites/default/files/doc/Jan%202026%20Monthly%20Gaming%20Tax%20Rev.pdf",
+NE_REPORTS_PAGE = "https://nrgc.nebraska.gov/gaming/reports"
+NE_BASE = "https://nrgc.nebraska.gov"
+
+# Fallback hardcoded URLs for past years (each is a year-cumulative breakdown).
+# For the current year, we discover individual monthly PDFs from the reports page,
+# because NE only publishes a year-cumulative file once the year is complete.
+FALLBACK_YEARLY_URLS = {
     2025: "https://nrgc.nebraska.gov/sites/default/files/doc/CY2025%20Monthly%20Gaming%20Tax%20Rev_2.pdf",
     2024: "https://nrgc.nebraska.gov/sites/default/files/2025-02/2024%20Gaming%20Tax%20Reveue%20Breakdown_0.pdf",
     2023: "https://nrgc.nebraska.gov/sites/default/files/2025-02/2023%20Gaming%20Tax%20Revenue%20Breakdown.pdf",
@@ -68,23 +72,93 @@ class NEScraper(BaseStateScraper):
         super().__init__("NE")
 
     def discover_periods(self) -> list[dict]:
-        """Return one period per yearly Revenue Breakdown PDF."""
+        """Discover NE monthly Revenue Breakdown PDFs.
+
+        For past years (with cumulative PDFs available), use FALLBACK_YEARLY_URLS.
+        For the current year, scrape the reports page to find individual monthly
+        PDFs (e.g. "March 2026 Monthly Gaming Tax Rev_0.pdf"), since NE doesn't
+        publish a year-cumulative file until the calendar year is complete.
+        """
+        from bs4 import BeautifulSoup
+
         periods = []
-        for year, url in sorted(PDF_URLS.items()):
+        current_year = date.today().year
+
+        # Past years: use cumulative PDFs (immutable)
+        for year, url in sorted(FALLBACK_YEARLY_URLS.items()):
             periods.append({
                 "download_url": url,
                 "year": year,
                 "period_end": date(year, 12, 31),
                 "period_type": "monthly",
+                "is_monthly_pdf": False,
             })
-        self.logger.info(f"  Found {len(periods)} NE Revenue Breakdown reports")
+
+        # Current year: discover individual monthly PDFs
+        try:
+            resp = requests.get(NE_REPORTS_PAGE,
+                                headers={"User-Agent": USER_AGENT},
+                                timeout=30)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+        except Exception as e:
+            self.logger.warning(f"Could not fetch NE reports page: {e}")
+            return periods
+
+        # Match links like "/sites/default/files/doc/March 2026 Monthly Gaming Tax Rev_0.pdf"
+        # We want the "Monthly Gaming Tax Rev" file, not the "20% Gaming Tax Only" variant.
+        seen_urls = set()
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if not href.lower().endswith(".pdf"):
+                continue
+            if "monthly gaming tax rev" not in href.lower().replace("%20", " "):
+                continue
+            # Skip variants that contain "20%" (the alt-tax-only file)
+            if "20%25" in href or "20%2520" in href:
+                continue
+
+            full_url = href if href.startswith("http") else NE_BASE + href
+            if full_url in seen_urls:
+                continue
+            seen_urls.add(full_url)
+
+            # Extract month + year from filename
+            decoded = href.replace("%20", " ")
+            m = re.search(r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{4})',
+                          decoded, re.IGNORECASE)
+            if not m:
+                continue
+            month_num = MONTH_ABBR.get(m.group(1).lower()[:3])
+            year = int(m.group(2))
+            if month_num is None or year != current_year:
+                continue
+
+            # period_end = last day of the month
+            last_day = calendar.monthrange(year, month_num)[1]
+            periods.append({
+                "download_url": full_url,
+                "year": year,
+                "month": month_num,
+                "period_end": date(year, month_num, last_day),
+                "period_type": "monthly",
+                "is_monthly_pdf": True,
+            })
+
+        self.logger.info(f"  Found {len(periods)} NE periods "
+                         f"({len(FALLBACK_YEARLY_URLS)} yearly + "
+                         f"{len(periods) - len(FALLBACK_YEARLY_URLS)} monthly for {current_year})")
         return periods
 
     def download_report(self, period_info: dict) -> Path:
         """Download NE PDF."""
         url = period_info["download_url"]
         year = period_info["year"]
-        filename = f"NE_{year}_revenue_breakdown.pdf"
+        month = period_info.get("month")
+        if period_info.get("is_monthly_pdf") and month:
+            filename = f"NE_{year}_{month:02d}_monthly_breakdown.pdf"
+        else:
+            filename = f"NE_{year}_revenue_breakdown.pdf"
         save_path = self.raw_dir / filename
 
         if not self._should_redownload(save_path):
