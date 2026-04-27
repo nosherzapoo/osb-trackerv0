@@ -122,8 +122,11 @@ class LAScraper(BaseStateScraper):
         source_url = period_info.get('download_url', period_info.get('url', None))
 
         for sheet_name in xls.sheet_names:
-            # Only parse FY sheets (FY22, FY23, etc.), skip "Current"
-            if not re.match(r'^FY\d{2}$', sheet_name.strip()):
+            # Parse FY sheets (FY22, FY23, etc.) and the live "Current" sheet —
+            # LSP consolidated all data into "Current" in 2026, so older FY-named
+            # sheets may no longer exist in fresh downloads.
+            sn = sheet_name.strip()
+            if not (re.match(r'^FY\d{2}$', sn) or sn.lower() == 'current'):
                 continue
 
             df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
@@ -161,6 +164,12 @@ class LAScraper(BaseStateScraper):
                     else:
                         period_end = pd.to_datetime(date_val).date()
                 except Exception:
+                    continue
+
+                # Reject obviously bogus dates — bare integers like 2024
+                # (calendar-year summary rows) get parsed by pandas as
+                # nanoseconds since epoch, yielding 1970-01-01.
+                if period_end.year < 2021 or period_end.year > 2031:
                     continue
 
                 # Convert first-of-month to end-of-month
