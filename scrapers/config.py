@@ -9,6 +9,7 @@ STATE_REGISTRY = {
         'regulatory_body': 'NY State Gaming Commission',
         'source_url': 'https://gaming.ny.gov/revenue-reports',
         'frequency': 'weekly',
+        'skip_weekly_aggregation': True,
         'format': 'xlsx',
         'has_operator_breakdown': True,
         'has_sport_breakdown': False,

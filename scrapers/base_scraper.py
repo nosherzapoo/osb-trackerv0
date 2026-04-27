@@ -365,8 +365,12 @@ class BaseStateScraper(ABC):
             except Exception as e:
                 self.logger.warning(f"Could not merge with existing CSV: {e}")
 
-        # If weekly-reporting state, recompute monthly aggregations from the full dataset
-        if self.config.get('frequency') == 'weekly':
+        # If weekly-reporting state, recompute monthly aggregations from the full dataset.
+        # States with their own authoritative monthly publication (e.g. NY) opt out
+        # via skip_weekly_aggregation — monthly numbers must come from that file, not
+        # be derived from weekly rollups.
+        if (self.config.get('frequency') == 'weekly'
+                and not self.config.get('skip_weekly_aggregation')):
             monthly = self._aggregate_to_monthly(combined)
             if not monthly.empty:
                 combined = pd.concat([combined, monthly], ignore_index=True)
@@ -562,6 +566,14 @@ class BaseStateScraper(ABC):
         weekly = weekly[weekly['period_start'].notna() & weekly['period_end'].notna()]
         if weekly.empty:
             return pd.DataFrame(columns=STANDARD_COLUMNS)
+
+        # Dedup before summing — existing CSV + fresh scrape can both contain
+        # the same week, and proration would otherwise double-count.
+        dedupe_keys = [c for c in ['state_code', 'period_start', 'period_end',
+                                   'operator_reported', 'channel', 'sport_category']
+                       if c in weekly.columns]
+        if dedupe_keys:
+            weekly = weekly.drop_duplicates(subset=dedupe_keys, keep='last')
 
         sum_cols = [c for c in MONEY_COLUMNS if c in weekly.columns and weekly[c].notna().any()]
 
