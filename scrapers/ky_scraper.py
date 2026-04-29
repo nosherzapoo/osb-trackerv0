@@ -220,6 +220,27 @@ class KYScraper(BaseStateScraper):
         self.logger.info(
             f"  Screenshotting {len(months_to_screenshot)} months from Tableau..."
         )
+
+        # Facility names that appear as DOM text once the Tableau viz has
+        # actually rendered. We wait for any one of these to show up before
+        # firing the screenshot — the 8s fixed timeout was insufficient on
+        # the VPS and produced blank captures.
+        facility_names = [
+            'Cumberland Run', 'Ellis Park', 'Kentucky Downs', 'Oak Grove',
+            'Red Mile', "Sandy's", 'Turfway Park', 'Churchill Downs',
+        ]
+        # Build a JS expression that returns true if body text contains any
+        # known facility name. Single-quoted JS string literals; "Sandy's"
+        # is escaped with a backslash.
+        js_names = ", ".join(
+            "'" + name.replace("'", "\\'") + "'" for name in facility_names
+        )
+        wait_expr = (
+            "() => { const t = document.body && document.body.innerText || ''; "
+            f"const names = [{js_names}]; "
+            "return names.some(n => t.includes(n)); }"
+        )
+
         try:
             with sync_playwright() as pw:
                 browser = pw.chromium.launch(headless=True)
@@ -232,24 +253,73 @@ class KYScraper(BaseStateScraper):
                         f"&YEAR(Reporting%20Period)={y}"
                         f"&MONTH(Reporting%20Period)={m}"
                     )
-                    try:
-                        # Tableau Public has constant background polling so
-                        # 'networkidle' rarely fires within budget. Wait for DOM
-                        # then give the viz extra time to paint.
-                        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                        page.wait_for_timeout(8000)  # let viz render
-                        page.screenshot(path=str(png_path), full_page=True)
-                        self.logger.info(f"  Captured: {png_path.name}")
 
-                        rows = self._ocr_and_parse_screenshot(png_path, y, m)
-                        if rows:
-                            all_rows.extend(rows)
-                        else:
+                    # Up to 3 attempts per month — escalating extra wait if
+                    # OCR yields zero rows. We screenshot to a tmp path first
+                    # and only promote to the cache path on success, so a
+                    # failed run won't poison the cache for next time.
+                    tmp_path = cache_dir / f"KY_{y}_{m:02d}.tmp.png"
+                    extra_waits_ms = [0, 15000, 25000]
+                    rows = []
+                    last_attempt_ok = False
+
+                    for attempt, extra_wait in enumerate(extra_waits_ms, start=1):
+                        try:
+                            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                            # Wait for the viz to populate with at least one
+                            # known facility name before screenshotting. If
+                            # the wait times out, fall through and let the
+                            # validation step reject the result.
+                            try:
+                                page.wait_for_function(wait_expr, timeout=60000)
+                            except Exception as wait_err:
+                                self.logger.warning(
+                                    f"  Tableau viz did not render facility names for "
+                                    f"{y}-{m:02d} (attempt {attempt}): {wait_err}"
+                                )
+                            if extra_wait:
+                                page.wait_for_timeout(extra_wait)
+                            page.screenshot(path=str(tmp_path), full_page=True)
+
+                            rows = self._ocr_and_parse_screenshot(tmp_path, y, m)
+                            if rows:
+                                # Promote tmp → cache only when valid.
+                                tmp_path.replace(png_path)
+                                self.logger.info(
+                                    f"  Captured: {png_path.name} (attempt {attempt})"
+                                )
+                                last_attempt_ok = True
+                                break
+                            else:
+                                self.logger.warning(
+                                    f"  No data parsed from {y}-{m:02d} screenshot "
+                                    f"(attempt {attempt}/{len(extra_waits_ms)}); retrying..."
+                                )
+                                if attempt < len(extra_waits_ms):
+                                    page.wait_for_timeout(5000)
+                        except Exception as e:
                             self.logger.warning(
-                                f"  No data parsed from {png_path.name}"
+                                f"  Tableau screenshot failed for {y}-{m:02d} "
+                                f"(attempt {attempt}): {e}"
                             )
-                    except Exception as e:
-                        self.logger.warning(f"  Tableau screenshot failed for {y}-{m:02d}: {e}")
+                            if attempt < len(extra_waits_ms):
+                                page.wait_for_timeout(5000)
+
+                    # Clean up tmp file if it's still around (failed run).
+                    try:
+                        if tmp_path.exists():
+                            tmp_path.unlink()
+                    except Exception:
+                        pass
+
+                    if last_attempt_ok and rows:
+                        all_rows.extend(rows)
+                    else:
+                        self.logger.warning(
+                            f"  Failed to capture valid Tableau screenshot for "
+                            f"{y}-{m:02d} after {len(extra_waits_ms)} attempts; "
+                            f"not caching — will retry on next run."
+                        )
 
                 browser.close()
         except Exception as e:
