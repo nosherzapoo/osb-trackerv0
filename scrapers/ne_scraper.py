@@ -32,11 +32,15 @@ NE_BASE = "https://nrgc.nebraska.gov"
 # Fallback hardcoded URLs for past years (each is a year-cumulative breakdown).
 # For the current year, we discover individual monthly PDFs from the reports page,
 # because NE only publishes a year-cumulative file once the year is complete.
+#
+# Note: 2022 is intentionally excluded — NE sports betting launched June 2023
+# (WarHorse Lincoln). The 2022 cumulative PDF has no Sports Betting line items,
+# so parsing it always returns empty, which made every incremental run end with
+# "No data parsed across all periods".
 FALLBACK_YEARLY_URLS = {
     2025: "https://nrgc.nebraska.gov/sites/default/files/doc/CY2025%20Monthly%20Gaming%20Tax%20Rev_2.pdf",
     2024: "https://nrgc.nebraska.gov/sites/default/files/2025-02/2024%20Gaming%20Tax%20Reveue%20Breakdown_0.pdf",
     2023: "https://nrgc.nebraska.gov/sites/default/files/2025-02/2023%20Gaming%20Tax%20Revenue%20Breakdown.pdf",
-    2022: "https://nrgc.nebraska.gov/sites/default/files/2025-02/2022%20Gaming%20Tax%20Revenue%20Breakdown_0.pdf",
 }
 
 # Known operators with sports betting (as they appear in the PDFs).
