@@ -46,6 +46,18 @@ CLASS_CHANNEL_MAP = {
     "c": "online",   # Mobile/online operators
 }
 
+# Known empty/duplicate report pages (regulator never published or page contains
+# data for a different month). Keying on (year, month) of the URL slug.
+# - Oct 2020 & Feb 2021: page node__content is empty; OLG never published
+# - June 2021: page erroneously contains July 2021 data (duplicate of july page)
+# - July 2021: page exists but the same content also appears at june-2021 URL;
+#   keep the july URL so we still have one copy via discover_periods
+DC_KNOWN_EMPTY_PERIODS = {
+    (2020, 10),
+    (2021, 2),
+    (2021, 6),
+}
+
 
 class DCScraper(BaseStateScraper):
     def __init__(self):
@@ -102,6 +114,10 @@ class DCScraper(BaseStateScraper):
                     period_end = self._extract_date_from_text(text)
 
                 if period_end:
+                    # Skip known-empty/duplicate periods so a routine run doesn't
+                    # repeatedly re-fetch them and trigger "No data parsed" alarms
+                    if (period_end.year, period_end.month) in DC_KNOWN_EMPTY_PERIODS:
+                        continue
                     periods.append({
                         "download_url": full_url,
                         "period_end": period_end,
@@ -358,21 +374,44 @@ class DCScraper(BaseStateScraper):
         wagers = None
         hold_pct = None
 
-        # Find dollar values in the cells
+        # Find numeric values in the cells. Reports come in two flavors:
+        #   formatted:   "$10,012,718.89"  (post-mid-2021)
+        #   unformatted: "10012718.89"     (pre/mid-2021 transition reports)
+        # The first numeric column is "Total Wagers" (integer count); the rest
+        # are dollars. The last column is a hold percentage (either "11.19%" or
+        # an unformatted fraction like "0.1219").
         dollar_cells = []
         for i, cell in enumerate(cells):
             cleaned = cell.strip()
+            if not cleaned:
+                continue
+            # Formatted dollar value
             if cleaned.startswith("$") or (cleaned.startswith("-") and "$" in cleaned) or cleaned == "$-":
                 dollar_cells.append((i, cleaned))
-            elif "%" in cleaned:
+                continue
+            # Formatted percentage
+            if "%" in cleaned:
                 hold_pct = self._parse_percentage(cleaned)
-
-        # Also look for numeric-only cells (wager counts)
-        for i, cell in enumerate(cells):
-            cleaned = cell.strip().replace(",", "")
-            if cleaned.isdigit() and int(cleaned) > 0:
-                if wagers is None:
-                    wagers = int(cleaned)
+                continue
+            # Unformatted numeric
+            test = cleaned.replace(",", "").lstrip("-")
+            if test and test.replace(".", "", 1).isdigit():
+                try:
+                    num = float(test)
+                except ValueError:
+                    continue
+                if "." in test:
+                    # Decimal — could be dollars or a hold-pct fraction (0-1)
+                    if 0 <= num < 1 and hold_pct is None:
+                        hold_pct = num
+                    else:
+                        dollar_cells.append((i, cleaned))
+                else:
+                    # Integer with no decimal — wager count if first, else dollars
+                    if wagers is None:
+                        wagers = int(num)
+                    else:
+                        dollar_cells.append((i, cleaned))
 
         # Assign dollar values based on position order
         # Expected order: Handle, Payouts, GGR, Tax
