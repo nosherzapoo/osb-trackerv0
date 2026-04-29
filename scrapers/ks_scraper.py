@@ -37,6 +37,19 @@ HEADERS = {
 
 KS_REPORTS_URL = "https://www.kslottery.com/publications/sports-monthly-revenues/"
 KS_DETAIL_URL = "https://www.kslottery.com/publications/sports-monthly-detail/"
+# Late-2025 redirect target: kslottery.com -> kslottery.gov
+KS_REPORTS_URL_GOV = "https://www.kslottery.gov/publications/sports-monthly-revenues/"
+KS_DETAIL_URL_GOV = "https://www.kslottery.gov/publications/sports-monthly-detail-breakdown/"
+
+# Hardcoded fallback URLs for historical months that may not appear on the live page
+# (e.g., 2022 launch months). Live page is the source of truth for everything else.
+KS_HARDCODED_URLS: dict = {
+    # 2022 launch months — kept as fallback in case the live page drops them
+    (2022, 9): "https://www.kslottery.com/media/avgnh3z3/sports-wagering-monthly-revenue-2022-09.pdf",
+    (2022, 10): "https://www.kslottery.com/media/3svfizss/sports-wagering-monthly-revenue-2022-10.pdf",
+    (2022, 11): "https://www.kslottery.com/media/dsjcjssb/sports-wagering-monthly-revenue-2022-11.pdf",
+    (2022, 12): "https://www.kslottery.com/media/svnldwox/sports-wagering-monthly-revenue-2022-12.pdf",
+}
 
 MONTH_NAMES = {
     "january": 1, "february": 2, "march": 3, "april": 4,
@@ -109,49 +122,113 @@ class KSScraper(BaseStateScraper):
         return periods
 
     def _scrape_report_links(self) -> dict:
-        """Scrape PDF links from KS Lottery publications pages."""
-        links = {}
+        """Scrape PDF links from KS Lottery publications pages.
 
-        for page_url in [KS_REPORTS_URL, KS_DETAIL_URL]:
+        Live page is the source of truth for currently-published months.
+        Each URL on the page rotates a random media-hash slug, e.g.
+            /media/<hash>/sports-wagering-monthly-revenue-YYYY-MM.pdf
+        We harvest these by parsing the page HTML.
+        """
+        links = self._fetch_live_pdf_urls()
+
+        # Merge hardcoded fallbacks (e.g., 2022 launch months) — but live wins
+        for key, url in KS_HARDCODED_URLS.items():
+            links.setdefault(key, url)
+
+        return links
+
+    def _fetch_live_pdf_urls(self) -> dict:
+        """Fetch the live KS Lottery sports-monthly-revenues page and parse out
+        all linked monthly PDFs. Returns {(year, month): absolute_url}.
+
+        The .com host 301-redirects to .gov as of late 2025; we hit both the
+        revenues page and the detail-breakdown page. Revenues take priority
+        (they're the format our parser is built for); detail PDFs are filled in
+        as fallback for any months the revenues page omits.
+        """
+        links: dict = {}
+
+        # (page_url, prefer_revenue_format) — revenue-format pages are scanned first
+        # so their URLs take precedence.
+        page_urls = [
+            (KS_REPORTS_URL_GOV, True),
+            (KS_REPORTS_URL, True),  # legacy .com URL (will redirect to .gov)
+            (KS_DETAIL_URL_GOV, False),
+            (KS_DETAIL_URL, False),  # legacy .com URL
+        ]
+
+        for page_url, _prefer in page_urls:
             try:
-                resp = requests.get(page_url, headers=HEADERS, timeout=30)
+                resp = requests.get(
+                    page_url,
+                    headers=HEADERS,
+                    timeout=30,
+                    allow_redirects=True,
+                )
                 if resp.status_code != 200:
+                    self.logger.warning(
+                        f"  KS publications page {page_url} returned {resp.status_code}"
+                    )
                     continue
+                # Use the final (post-redirect) URL as the base for relative hrefs
+                base_url = resp.url
                 soup = BeautifulSoup(resp.text, "html.parser")
+                page_host = "https://www.kslottery.gov" if "kslottery.gov" in base_url else "https://www.kslottery.com"
 
                 for a in soup.find_all("a", href=True):
                     href = a["href"]
                     if ".pdf" not in href.lower():
                         continue
 
-                    text = a.get_text(strip=True).lower()
-                    combined = text + " " + href.lower()
-
-                    # Extract date from URL pattern:
-                    # sports-wagering-monthly-revenue-2025-01.pdf
-                    url_match = re.search(r'(\d{4})-(\d{2})\.pdf', href)
+                    # Pattern 1: /media/<hash>/sports-wagering-monthly-revenue-YYYY-MM.pdf
+                    # Pattern 2: /media/<hash>/sports-wagering-monthly-detail-YYYY-MM.pdf
+                    url_match = re.search(r"(\d{4})-(\d{1,2})\.pdf", href)
+                    year, month = None, None
                     if url_match:
                         year = int(url_match.group(1))
                         month = int(url_match.group(2))
-                        if 2022 <= year <= 2030 and 1 <= month <= 12:
-                            full_url = href if href.startswith("http") else f"https://www.kslottery.com{href}"
-                            links[(year, month)] = full_url
-                            continue
 
-                    # Try extracting from link text: "January 2025"
-                    for month_name, month_num in MONTH_NAMES.items():
-                        if month_name in combined:
-                            year_match = re.search(r'(\d{4})', combined)
-                            if year_match:
-                                year = int(year_match.group(1))
-                                if 2022 <= year <= 2030:
-                                    full_url = href if href.startswith("http") else f"https://www.kslottery.com{href}"
-                                    links[(year, month_num)] = full_url
+                    if year is None:
+                        # Fallback: extract month/year from anchor text
+                        text = a.get_text(strip=True).lower()
+                        combined = text + " " + href.lower()
+                        for month_name, month_num in MONTH_NAMES.items():
+                            if month_name in combined:
+                                year_match = re.search(r"(20\d{2})", combined)
+                                if year_match:
+                                    year = int(year_match.group(1))
+                                    month = month_num
                                     break
+
+                    if year is None or month is None:
+                        continue
+                    if not (2022 <= year <= 2099 and 1 <= month <= 12):
+                        continue
+
+                    if href.startswith("http"):
+                        full_url = href
+                    elif href.startswith("//"):
+                        full_url = "https:" + href
+                    elif href.startswith("/"):
+                        full_url = page_host + href
+                    else:
+                        # Relative path — resolve against base
+                        full_url = page_host + "/" + href
+
+                    # Don't overwrite a revenue-format URL with a detail-format one
+                    existing = links.get((year, month))
+                    if existing and "monthly-revenue" in existing.lower():
+                        continue
+                    links[(year, month)] = full_url
 
             except Exception as e:
                 self.logger.warning(f"  Failed to scrape {page_url}: {e}")
                 continue
+
+        if links:
+            self.logger.info(f"  Found {len(links)} PDF links on KS Lottery site")
+        else:
+            self.logger.warning("  No PDF links discovered on KS Lottery site")
 
         return links
 
@@ -171,10 +248,14 @@ class KSScraper(BaseStateScraper):
         if "download_url" in period_info:
             candidates.append(period_info["download_url"])
 
-        # Known KS Lottery URL pattern
-        # e.g., /media/jvinlp0b/sports-wagering-monthly-revenue-2025-01.pdf
-        # The media hash changes per file, but try the standard pattern
+        # Hardcoded fallback for historical months
+        if (year, month) in KS_HARDCODED_URLS:
+            candidates.append(KS_HARDCODED_URLS[(year, month)])
+
+        # Last-resort generic patterns (the media hash is randomized so these
+        # rarely resolve, but kept for completeness)
         candidates.extend([
+            f"https://www.kslottery.gov/media/sports-wagering-monthly-revenue-{year}-{month:02d}.pdf",
             f"https://www.kslottery.com/media/sports-wagering-monthly-revenue-{year}-{month:02d}.pdf",
         ])
 
@@ -196,7 +277,7 @@ class KSScraper(BaseStateScraper):
 
         raise FileNotFoundError(
             f"KS report not found for {year}-{month:02d}. "
-            f"Check {KS_REPORTS_URL} for current links."
+            f"Check {KS_REPORTS_URL_GOV} for current links."
         )
 
     def parse_report(self, file_path: Path, period_info: dict) -> pd.DataFrame:
