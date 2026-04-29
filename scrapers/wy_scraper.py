@@ -47,17 +47,28 @@ HEADERS = {
 
 BASE_URL = "https://gaming.wyo.gov"
 
-# Archive pages that list monthly reports (yearly groupings)
-ARCHIVE_PAGES = {
-    2023: "/historical-revenue-reports/archive-combined-wagering-activity-2023",
-    2024: "/historical-revenue-reports/archive-combined-wagering-activity-2024",
-    2025: "/historical-revenue-reports/archive-combined-wagering-activity-reports-2025",
-    2026: "/historical-revenue-reports/archive-combined-wagering-activity-reports-2026",
-}
-
-# Fallback pages to check for current-year reports
-CURRENT_REPORT_PAGES = [
+# Source pages, in priority order (HIGHEST priority FIRST).
+# Each page is scraped, then later (lower-priority) hits do NOT overwrite IDs
+# already discovered from a higher-priority page. This matters because the OSW
+# legacy page still lists 2021-2023 months with stale Drive IDs that 404, while
+# the per-year archive pages and the current main page list fresh, working IDs.
+SOURCE_PAGES = [
+    # Current main page is authoritative for the latest year (incl. 2026
+    # reports — there is no per-year archive page for 2026 yet).
     "/revenue-reports/financial-reports/combined-wagering-activity-reports",
+    # Per-year archive pages (live + maintained by WGC).
+    "/historical-revenue-reports/archive-combined-wagering-activity-reports-2025",
+    "/historical-revenue-reports/archive-combined-wagering-activity-2024",
+    "/historical-revenue-reports/archive-combined-wagering-activity-2023",
+    # Optional candidates that may exist in the future (try them; ignore 404).
+    "/historical-revenue-reports/archive-combined-wagering-activity-reports-2026",
+    "/historical-revenue-reports/archive-combined-wagering-activity-reports-2024",
+    "/historical-revenue-reports/archive-combined-wagering-activity-reports-2023",
+    "/historical-revenue-reports/archive-combined-wagering-activity-2025",
+    "/historical-revenue-reports/archive-combined-wagering-activity-2026",
+    # Legacy OSW page — kept LAST because its 2021-2023 Drive IDs are mostly
+    # 404 now, but it's the only source for some early 2021/2022 months that
+    # still happen to work.
     "/historical-revenue-reports/osw",
 ]
 
@@ -142,24 +153,63 @@ class WYScraper(BaseStateScraper):
 
     def _scrape_all_archive_pages(self) -> dict[tuple[int, int], str]:
         """
-        Scrape all known archive pages plus current report pages.
+        Scrape all known WGC source pages and discover monthly Drive file IDs.
+
+        Strategy:
+          - Iterate SOURCE_PAGES in priority order (highest priority first).
+          - First page to produce a (year, month) -> file_id wins; later pages
+            cannot overwrite it. This protects against the legacy OSW page,
+            which still lists older months with stale (404'd) Drive IDs.
+          - Each candidate ID is verified live before being trusted; dead IDs
+            are dropped so we don't burn the per-period download attempt on a
+            URL we already know is 404.
+
         Returns {(year, month): google_drive_file_id}.
         """
         results: dict[tuple[int, int], str] = {}
 
-        # Archive pages (yearly)
-        for year, path in ARCHIVE_PAGES.items():
+        for path in SOURCE_PAGES:
             url = f"{BASE_URL}{path}"
             found = self._scrape_page_for_drive_ids(url)
-            results.update(found)
-
-        # Current report pages (fallback)
-        for path in CURRENT_REPORT_PAGES:
-            url = f"{BASE_URL}{path}"
-            found = self._scrape_page_for_drive_ids(url)
-            results.update(found)
+            for key, fid in found.items():
+                if key in results:
+                    # Higher-priority page already supplied an ID; keep it.
+                    continue
+                if not self._verify_drive_id(fid):
+                    self.logger.debug(
+                        f"    Skipped dead Drive ID for {key[0]}-{key[1]:02d} "
+                        f"({fid[:12]}...) from {path}"
+                    )
+                    continue
+                results[key] = fid
 
         return results
+
+    def _verify_drive_id(self, file_id: str) -> bool:
+        """
+        Check whether a Google Drive file ID is currently reachable.
+        Issues a small ranged GET to the direct-download URL and inspects the
+        first few bytes (PDFs start with "%PDF"). Returns False on 404 or any
+        non-PDF response (e.g. revoked permission HTML).
+        """
+        url = GDRIVE_DOWNLOAD_URL.format(file_id=file_id)
+        try:
+            # Use Range to avoid pulling the full PDF just to verify reachability.
+            resp = self.session.get(
+                url,
+                timeout=20,
+                allow_redirects=True,
+                headers={"Range": "bytes=0-1023"},
+                stream=False,
+            )
+        except Exception as e:
+            self.logger.debug(f"    verify_drive_id error for {file_id[:12]}...: {e}")
+            return False
+
+        if resp.status_code in (200, 206):
+            head = resp.content[:5] if resp.content else b""
+            return head.startswith(b"%PDF")
+        return False
 
     def _scrape_page_for_drive_ids(self, url: str) -> dict[tuple[int, int], str]:
         """
