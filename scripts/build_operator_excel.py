@@ -33,7 +33,7 @@ from scrapers.config import STATE_REGISTRY  # noqa: E402
 
 OPERATOR_STATES = [
     'AZ', 'CT', 'DC', 'IA', 'IL', 'IN', 'KS', 'KY', 'MA', 'MD',
-    'MI', 'MO', 'NJ', 'NY', 'OH', 'PA', 'WV', 'WY',
+    'ME', 'MI', 'MO', 'NH', 'NJ', 'NY', 'OH', 'OR', 'PA', 'WV', 'WY',
 ]
 TARGET_BRANDS = ['FanDuel', 'DraftKings', 'BetMGM', 'Fanatics', 'Caesars', 'ESPN Bet']
 DATA_DIR = REPO / 'data' / 'processed'
@@ -420,8 +420,10 @@ def main():
         'Note': [
             'SCOPE: Online channel only. Retail and combined channels excluded.',
             'TIME WINDOW: All time (since each state\'s online launch).',
-            'STATES INCLUDED (18): AZ, CT, DC, IA, IL, IN, KS, KY, MA, MD, MI, MO, NJ, NY, OH, PA, WV, WY.',
-            'STATES EXCLUDED — no operator-level online breakdown: AR, CO, DE, LA, ME, MS, MT, NC, NE, NH, NV, OR, RI, SD, TN, VA, VT.',
+            'STATES INCLUDED (21): AZ, CT, DC, IA, IL, IN, KS, KY, MA, MD, ME, MI, MO, NH, NJ, NY, OH, OR, PA, WV, WY.',
+            'STATES EXCLUDED — no operator-level online breakdown: AR, CO, DE, LA, MS, MT, NC, NE, NV, RI, SD, TN, VA, VT.',
+            'NH and OR are DraftKings monopolies (state-exclusive contracts) — all of each state\'s online handle/GGR rolls into the DraftKings bucket.',
+            'ME is a tribal-compact 2-operator market (DraftKings + Caesars).',
             'BUCKETS (fixed): FanDuel, DraftKings, BetMGM, Fanatics, Caesars, ESPN Bet, Others. Barstool history is already merged into ESPN Bet via the upstream operator_standard mapping.',
             'GGR DEFINITION: standard_ggr = handle − payouts. Normalized across states.',
             'HOLD: GGR / Handle, computed at the bucket level.',
