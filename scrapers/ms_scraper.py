@@ -5,6 +5,14 @@ Format: Excel (.xlsx/.xls), one per month
 Launch: August 2018
 Tax: 12% on gross revenue (8% state + 4% local)
 Note: Retail only, 3 regions (Central/Coastal/Northern), sport breakdown, no operator detail
+
+Known unavailable periods (regulator never published; do not retry):
+  - 2018-08: launch month, first published report is 2018-09 (Aug+Sep combined)
+  - 2020-04: COVID-era casino shutdown, no activity, no report
+
+The MS server returns HTTP 200 with HTML content (not 404) for missing files,
+so we must inspect Content-Type to distinguish a real Excel response from a
+disguised "not found" page.
 """
 
 import sys
@@ -27,6 +35,13 @@ USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36
 MS_START_YEAR = 2018
 MS_START_MONTH = 8
 
+# Periods regulator never published — skip at discovery to avoid wasted
+# downloads + spurious "FAIL" log spam every incremental run.
+MS_KNOWN_MISSING = {
+    (2018, 8),   # launch month, no separate report (first publication is 2018-09)
+    (2020, 4),   # COVID shutdown, no activity
+}
+
 REGIONS = {"Sheet1": "Central", "Sheet2": "Coastal", "Sheet3": "Northern"}
 
 
@@ -46,12 +61,14 @@ class MSScraper(BaseStateScraper):
             if period_end > today:
                 break
 
-            periods.append({
-                "period_end": period_end,
-                "period_type": "monthly",
-                "year": year,
-                "month": month,
-            })
+            # Skip periods the regulator never published (see module docstring).
+            if (year, month) not in MS_KNOWN_MISSING:
+                periods.append({
+                    "period_end": period_end,
+                    "period_type": "monthly",
+                    "year": year,
+                    "month": month,
+                })
 
             month += 1
             if month > 12:
