@@ -74,7 +74,14 @@ class MDScraper(BaseStateScraper):
         return periods
 
     def _find_xlsx_on_page(self, page_url: str) -> str | None:
-        """Find .xlsx download link on a report page."""
+        """Find .xlsx download link on a report page.
+
+        Some recent press releases (e.g. Feb 2026) only link an "accessible"
+        PDF and omit the xlsx entirely, even though the regulator still
+        uploads the xlsx at its conventional path. When no xlsx link is
+        found we infer the month/year from the page title and probe the
+        conventional URL pattern.
+        """
         try:
             resp = requests.get(page_url, headers={
                 "User-Agent": USER_AGENT,
@@ -85,8 +92,45 @@ class MDScraper(BaseStateScraper):
                 href = link["href"]
                 if ".xlsx" in href.lower():
                     return href
-        except Exception:
-            pass
+
+            # Fallback: derive xlsx URL from any PDF link on the page that
+            # follows the wp-content/uploads/{YYYY}/{MM}/<MonthName>-<Year>-...pdf
+            # pattern. The xlsx version usually lives at the same prefix, but
+            # for accessibility-only re-publishes (e.g. Feb 2026) the PDF lives
+            # in a later month folder while the original xlsx remains in an
+            # earlier one — probe a few neighbouring months.
+            pdf_match = re.search(
+                r'https?://[^"\']*?/wp-content/uploads/(\d{4})/(\d{2})/'
+                r'([A-Za-z]+-\d{4}-Sports-Wagering-Data)[^"\']*\.pdf',
+                resp.text, re.I,
+            )
+            if pdf_match:
+                yr = int(pdf_match.group(1))
+                mo = int(pdf_match.group(2))
+                stem = pdf_match.group(3)
+                # Probe target month folder, then 1-2 months earlier
+                for delta in (0, -1, -2, 1):
+                    probe_y, probe_m = yr, mo + delta
+                    if probe_m <= 0:
+                        probe_m += 12
+                        probe_y -= 1
+                    elif probe_m > 12:
+                        probe_m -= 12
+                        probe_y += 1
+                    candidate = (
+                        f"https://www.mdgaming.com/wp-content/uploads/"
+                        f"{probe_y}/{probe_m:02d}/{stem}.xlsx"
+                    )
+                    try:
+                        head = requests.head(candidate, headers={
+                            "User-Agent": USER_AGENT,
+                        }, timeout=15, allow_redirects=True)
+                        if head.status_code == 200:
+                            return candidate
+                    except Exception:
+                        continue
+        except Exception as e:
+            self.logger.debug(f"  _find_xlsx_on_page error for {page_url}: {e}")
         return None
 
     def _extract_date(self, xlsx_url: str, page_url: str) -> date | None:
@@ -121,7 +165,18 @@ class MDScraper(BaseStateScraper):
         return save_path
 
     def parse_report(self, file_path: Path, period_info: dict) -> pd.DataFrame:
-        """Parse MD Excel report (retail + mobile sections)."""
+        """Parse MD Excel report (retail + mobile sections).
+
+        Three known historical layouts:
+          (1) Sep 2022+ (current): col A is the section header ('RETAIL'/'MOBILE'),
+              col A licensee, col B period label ('Month'/'FYTD'), col C+ values.
+          (2) Jan-Aug 2022: no section header. Col A=Licensee, col B=Retail/Mobile,
+              col C=Handle, col D=Prizes Paid, col F=Promo, col H=Taxable Win,
+              col I=Tax (or "Contributions").
+          (3) Dec 2021: col A=Month (date), col B=Licensee, col C=Retail/Mobile,
+              col D=Handle, col E=Prizes Paid, col G=Promo, col I=Taxable Win,
+              col J=Tax.
+        """
         period_end = period_info["period_end"]
         source_url = period_info.get('download_url', period_info.get('url', None))
 
@@ -135,62 +190,111 @@ class MDScraper(BaseStateScraper):
         data_sheet = xls.sheet_names[0]
         df = pd.read_excel(file_path, sheet_name=data_sheet, header=None)
 
-        # Find the header row index for source_context (row with "Licensee"/"Handle")
+        # Locate header row + figure out which layout we have. The header row is
+        # the first row containing the literal "handle" cell (case-insensitive).
         md_header_row = 0
+        header_cells = []
         for _hi in range(min(20, len(df))):
-            for _ci in range(min(10, df.shape[1])):
-                _hv = df.iloc[_hi, _ci]
-                if pd.notna(_hv) and "handle" in str(_hv).strip().lower():
-                    md_header_row = _hi
-                    break
-            else:
-                continue
-            break
+            row_vals = [str(df.iloc[_hi, _ci]).strip().lower() if pd.notna(df.iloc[_hi, _ci]) else ''
+                        for _ci in range(min(12, df.shape[1]))]
+            if any('handle' in v for v in row_vals):
+                md_header_row = _hi
+                header_cells = row_vals
+                break
+
+        # Detect column layout from header row
+        col_map = self._detect_column_layout(header_cells)
 
         all_rows = []
         current_channel = None
+        # If header puts retail/mobile inline (per-row), there is no section header
+        per_row_channel = col_map.get('channel_col') is not None
 
         for i in range(len(df)):
-            val_a = df.iloc[i, 0] if df.shape[1] > 0 else None
-            if pd.isna(val_a):
+            # Identify the licensee for this row. In Sep-2022+ layout this is
+            # col A; in Dec 2021 layout col A is the period date and the
+            # licensee is col B.
+            licensee_col = col_map.get('licensee_col', 0)
+            val_lic = df.iloc[i, licensee_col] if df.shape[1] > licensee_col else None
+            if pd.isna(val_lic):
                 continue
 
-            label = str(val_a).strip()
+            label = str(val_lic).strip()
             label_lower = label.lower()
 
-            # Detect section headers
-            if label_lower == "retail" or "retail" in label_lower and "total" not in label_lower:
-                if "licensee" not in label_lower:
-                    current_channel = "retail"
-                    continue
-            elif label_lower == "mobile" or "mobile" in label_lower and "total" not in label_lower:
-                if "licensee" not in label_lower:
-                    current_channel = "online"
-                    continue
-            elif "combined statewide" in label_lower:
-                break  # Skip combined to avoid double counting
+            # Also keep val_a for section-header detection in Sep-2022+ layout
+            val_a = df.iloc[i, 0] if df.shape[1] > 0 else None
 
-            if current_channel is None:
-                continue
+            # In per-row-channel layouts, col A is the licensee (or a date in
+            # the Dec 2021 format). Skip header/total rows but don't try to
+            # toggle current_channel from col A.
+            if not per_row_channel:
+                # Detect section headers (col A = 'RETAIL'/'MOBILE')
+                if label_lower == "retail" or "retail" in label_lower and "total" not in label_lower:
+                    if "licensee" not in label_lower:
+                        current_channel = "retail"
+                        continue
+                elif label_lower == "mobile" or "mobile" in label_lower and "total" not in label_lower:
+                    if "licensee" not in label_lower:
+                        current_channel = "online"
+                        continue
+                elif "combined statewide" in label_lower:
+                    break  # Skip combined to avoid double counting
+
+                if current_channel is None:
+                    continue
 
             # Skip headers and sub-headers
             if ("licensee" in label_lower or "handle" in label_lower or
                 "month" in label_lower or not label):
                 continue
+            # Skip combined/total rows
+            if "combined" in label_lower or "subtotal" in label_lower:
+                # In per-row-channel layouts a 'Combined' row marks end of monthly section
+                if per_row_channel:
+                    break
+                continue
 
-            # Check col B for "Month" vs "FYTD" — only want monthly rows
-            val_b = df.iloc[i, 1] if df.shape[1] > 1 else None
-            if pd.notna(val_b):
-                b_str = str(val_b).strip().lower()
-                if "fytd" in b_str or "fiscal" in b_str:
-                    continue  # Skip FYTD rows
+            # Resolve channel for this row
+            row_channel = current_channel
+            if per_row_channel:
+                ch_val = df.iloc[i, col_map['channel_col']] if df.shape[1] > col_map['channel_col'] else None
+                if pd.isna(ch_val):
+                    continue
+                ch_str = str(ch_val).strip().lower()
+                if "retail" in ch_str:
+                    row_channel = "retail"
+                elif "mobile" in ch_str:
+                    row_channel = "online"
+                else:
+                    continue
 
-            # Parse financial data
-            handle = self._parse_money(df.iloc[i, 2] if df.shape[1] > 2 else None)
-            payouts = self._parse_money(df.iloc[i, 3] if df.shape[1] > 3 else None)
-            promo = self._parse_money(df.iloc[i, 5] if df.shape[1] > 5 else None)
-            taxable_win = self._parse_money(df.iloc[i, 7] if df.shape[1] > 7 else None)
-            tax = self._parse_money(df.iloc[i, 8] if df.shape[1] > 8 else None)
+            if row_channel is None:
+                continue
+
+            # Check the period-label column for "FYTD"/"FY" — only want monthly
+            # rows. In current format that's col B; in old formats it's absent
+            # or in a different column.
+            period_col = col_map.get('period_col', 1)
+            if period_col is not None and df.shape[1] > period_col:
+                val_p = df.iloc[i, period_col]
+                if pd.notna(val_p):
+                    p_str = str(val_p).strip().lower()
+                    if "fytd" in p_str or "fiscal" in p_str:
+                        continue
+
+            # Resolve column indices (with sane defaults for current layout)
+            handle_c = col_map.get('handle_col', 2)
+            payouts_c = col_map.get('payouts_col', handle_c + 1)
+            promo_c = col_map.get('promo_col', handle_c + 3)
+            tw_c = col_map.get('taxable_win_col', handle_c + 5)
+            tax_c = col_map.get('tax_col', handle_c + 6)
+
+            handle = self._parse_money(df.iloc[i, handle_c]) if df.shape[1] > handle_c else None
+            payouts = self._parse_money(df.iloc[i, payouts_c]) if df.shape[1] > payouts_c else None
+            promo = self._parse_money(df.iloc[i, promo_c]) if df.shape[1] > promo_c else None
+            taxable_win = self._parse_money(df.iloc[i, tw_c]) if df.shape[1] > tw_c else None
+            tax = self._parse_money(df.iloc[i, tax_c]) if df.shape[1] > tax_c else None
 
             if handle is None and taxable_win is None:
                 continue
@@ -219,7 +323,7 @@ class MDScraper(BaseStateScraper):
                 "period_end": period_end,
                 "period_type": "monthly",
                 "operator_raw": label,
-                "channel": current_channel,
+                "channel": row_channel,
                 "handle": handle,
                 "gross_revenue": gross_revenue,
                 "standard_ggr": standard_ggr,
@@ -246,6 +350,43 @@ class MDScraper(BaseStateScraper):
         result["period_end"] = pd.to_datetime(result["period_end"])
         result["period_start"] = result["period_end"].apply(lambda d: d.replace(day=1))
         return result
+
+    def _detect_column_layout(self, header_cells: list[str]) -> dict:
+        """Map column meaning -> column index based on the header row.
+
+        Returns a dict with optional keys:
+            licensee_col, channel_col, period_col,
+            handle_col, payouts_col, promo_col, taxable_win_col, tax_col
+        Missing keys mean "use default for current Sep-2022+ layout".
+        """
+        layout: dict = {}
+        for idx, val in enumerate(header_cells):
+            v = (val or '').lower()
+            if not v:
+                continue
+            if 'licensee' in v and 'licensee_col' not in layout:
+                layout['licensee_col'] = idx
+            elif 'retail' in v and 'mobile' in v:
+                # 'Retail / Mobile' inline channel column
+                layout['channel_col'] = idx
+            elif v == 'month' or 'month' == v.strip():
+                layout['period_col'] = idx
+            elif 'handle' in v and 'handle_col' not in layout:
+                layout['handle_col'] = idx
+            elif 'prizes' in v and 'paid' in v:
+                layout['payouts_col'] = idx
+            elif 'promotion' in v or v.strip() == 'promo':
+                layout['promo_col'] = idx
+            elif 'taxable' in v:
+                layout['taxable_win_col'] = idx
+            elif ('contributions' in v and 'state' in v) or v.strip() == 'tax':
+                layout['tax_col'] = idx
+
+        # If channel_col is set we're in a per-row layout — period_col becomes
+        # irrelevant (no FYTD rows in those formats).
+        if 'channel_col' in layout and 'period_col' not in layout:
+            layout['period_col'] = None
+        return layout
 
     def _parse_sport_sheet(self, xls, file_path: Path, period_end: date, source_url: str = None) -> list[dict]:
         """Parse the 'Bets By Sport' sheet for sport-level breakdown.
