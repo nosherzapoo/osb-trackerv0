@@ -8,6 +8,7 @@ import App from './App';
 ReactGA.initialize('G-WJ6TQ113YS');
 import LandingPage from './components/LandingPage';
 import ApiAccessPage from './components/ApiAccessPage';
+import OpsApp from './ops/OpsApp';
 import './styles.css';
 
 function StateRedirect() {
@@ -28,6 +29,7 @@ createRoot(document.getElementById('root')).render(
         <Route path="/state/:code" element={<StateRedirect />} />
         <Route path="/operators" element={<OperatorRedirect />} />
         <Route path="/app/*" element={<App />} />
+        <Route path="/ops/*" element={<OpsApp />} />
       </Routes>
     </BrowserRouter>
     <Analytics />
