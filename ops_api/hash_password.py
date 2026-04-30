@@ -6,16 +6,16 @@ Usage:
 
 import sys
 
-from passlib.context import CryptContext
+import bcrypt
 
 
 def main():
     if len(sys.argv) < 2:
         print("Usage: python -m ops_api.hash_password '<plaintext password>'")
         sys.exit(2)
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-    hashed = pwd_context.hash(sys.argv[1])
-    print(hashed)
+    secret = sys.argv[1].encode("utf-8")[:72]
+    hashed = bcrypt.hashpw(secret, bcrypt.gensalt(rounds=12))
+    print(hashed.decode("utf-8"))
 
 
 if __name__ == "__main__":

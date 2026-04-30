@@ -9,21 +9,23 @@ Generate a hash with `python -m ops_api.hash_password <plaintext>`.
 import os
 from datetime import datetime, timedelta, timezone
 
+import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 ALGORITHM = "HS256"
 DEFAULT_TTL_HOURS = 24
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/ops/auth/login", auto_error=False)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
     try:
-        return pwd_context.verify(plain, hashed)
+        # bcrypt rejects passwords longer than 72 bytes — truncate to match how
+        # we hash on the way in (sha256-prehash would be safer but breaks
+        # interop; we just clip).
+        return bcrypt.checkpw(plain.encode("utf-8")[:72], hashed.encode("utf-8"))
     except Exception:
         return False
 
