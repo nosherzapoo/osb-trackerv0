@@ -1,0 +1,30 @@
+[Unit]
+Description=OSB tracker — ops API (FastAPI + uvicorn)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/srv/osb-trackerv0
+EnvironmentFile=/srv/osb-trackerv0/.env
+ExecStart=/srv/osb-trackerv0/.venv/bin/uvicorn ops_api.main:app \
+    --host 127.0.0.1 --port 8001 \
+    --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Hardening — read-only fs, no new privs. Loosen if Phase 3 needs to spawn jobs.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/osb-trackerv0
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
