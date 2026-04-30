@@ -390,17 +390,6 @@ class BaseStateScraper(ABC):
         period_counts = combined['period_type'].value_counts().to_dict()
         self.logger.info(f"Complete: {len(combined)} total rows ({period_counts})")
 
-        # Push to Supabase (graceful — CSV is already saved)
-        try:
-            from pipeline.db import upsert_dataframe
-            result = upsert_dataframe(combined)
-            self.logger.info(
-                f"Supabase: {result.get('inserted', 0)} upserted, "
-                f"{result.get('errors', 0)} errors"
-            )
-        except Exception as e:
-            self.logger.debug(f"Supabase push skipped: {e}")
-
         # Run anomaly detection after every scrape
         try:
             from pipeline.anomaly_check import AnomalyChecker
