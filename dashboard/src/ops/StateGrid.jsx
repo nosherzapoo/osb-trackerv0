@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from './api';
 import { fmtDollars, fmtPct, fmtPctSigned, fmtPeriod, fmtRelativeTime, fmtDuration } from './format';
+import JobDrawer from './JobDrawer';
 
 export default function StateGrid() {
   const [data, setData] = useState(null);
@@ -8,6 +9,31 @@ export default function StateGrid() {
   const [filter, setFilter] = useState('all');
   const [sort, setSort] = useState('tier');
   const [search, setSearch] = useState('');
+  const [activeJobId, setActiveJobId] = useState(null);
+  const [actionError, setActionError] = useState(null);
+
+  const triggerScrape = async (code, backfill = false) => {
+    setActionError(null);
+    try {
+      const r = await api.scrapeState([code], backfill);
+      setActiveJobId(r.job_id);
+    } catch (e) {
+      setActionError(e.message);
+    }
+  };
+
+  const toggleDisabled = async (code, currentlyDisabled) => {
+    setActionError(null);
+    const reason = !currentlyDisabled
+      ? prompt('Why disable this state in tier runs?')
+      : null;
+    if (!currentlyDisabled && reason === null) return; // user cancelled enable->disable
+    try {
+      await api.setStateOverride(code, !currentlyDisabled, reason);
+    } catch (e) {
+      setActionError(e.message);
+    }
+  };
 
   useEffect(() => {
     let alive = true;
@@ -91,14 +117,28 @@ export default function StateGrid() {
         </div>
       </div>
 
+      {actionError && <div className="ops-error">{actionError}</div>}
+
       <div className="ops-state-grid">
-        {visibleStates.map((s) => <StateCard key={s.state_code} state={s} />)}
+        {visibleStates.map((s) => (
+          <StateCard
+            key={s.state_code}
+            state={s}
+            onScrape={() => triggerScrape(s.state_code, false)}
+            onBackfill={() => triggerScrape(s.state_code, true)}
+            onToggleDisabled={() => toggleDisabled(s.state_code, s.disabled)}
+          />
+        ))}
       </div>
+
+      {activeJobId && (
+        <JobDrawer jobId={activeJobId} onClose={() => setActiveJobId(null)} />
+      )}
     </div>
   );
 }
 
-function StateCard({ state }) {
+function StateCard({ state, onScrape, onBackfill, onToggleDisabled }) {
   const f = state.financials || {};
   const lastRun = state.last_run || {};
   const an = state.open_anomalies || { high: 0, medium: 0, low: 0 };
@@ -168,6 +208,17 @@ function StateCard({ state }) {
           {lastRun.error_text.slice(0, 80)}{lastRun.error_text.length > 80 ? '…' : ''}
         </div>
       )}
+
+      <div className="ops-card-actions">
+        <button className="ops-btn ops-btn-sm" onClick={onScrape}>Scrape</button>
+        <button className="ops-btn ops-btn-sm" onClick={onBackfill}>Backfill</button>
+        <button
+          className={`ops-btn ops-btn-sm ${state.disabled ? 'ops-btn-warn' : ''}`}
+          onClick={onToggleDisabled}
+        >
+          {state.disabled ? 'Enable' : 'Disable'}
+        </button>
+      </div>
     </div>
   );
 }

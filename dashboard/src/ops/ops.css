@@ -490,6 +490,33 @@
 .ops-link { color: var(--accent-primary); text-decoration: none; }
 .ops-link:hover { text-decoration: underline; }
 
+.ops-card-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 8px;
+}
+.ops-btn-warn {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.ops-pre {
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 400 12px/1.5 var(--font-mono);
+  color: var(--text-secondary);
+  max-height: 360px;
+  overflow-y: auto;
+}
+.ops-pre.ops-output { color: var(--text-primary); }
+
 /* ── Misc ─────────────────────────────────────────────── */
 .ops-mono { font-family: var(--font-mono); }
 .ops-small { font-size: 11px; }

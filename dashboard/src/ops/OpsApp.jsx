@@ -6,6 +6,7 @@ import StateGrid from './StateGrid';
 import RunHistory from './RunHistory';
 import AnomalyInbox from './AnomalyInbox';
 import Sources from './Sources';
+import Jobs from './Jobs';
 import './ops.css';
 
 const TABS = [
@@ -14,6 +15,7 @@ const TABS = [
   { id: 'runs',      label: 'Runs' },
   { id: 'anomalies', label: 'Anomalies' },
   { id: 'sources',   label: 'Sources' },
+  { id: 'jobs',      label: 'Jobs' },
 ];
 
 export default function OpsApp() {
@@ -68,6 +70,7 @@ export default function OpsApp() {
         {tab === 'runs' && <RunHistory />}
         {tab === 'anomalies' && <AnomalyInbox />}
         {tab === 'sources' && <Sources />}
+        {tab === 'jobs' && <Jobs />}
       </main>
     </div>
   );

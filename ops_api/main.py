@@ -654,6 +654,197 @@ def delete_suppression_rule(rule_id: int, user: str = Depends(require_user)):
 
 
 # =============================================================================
+# Manual override actions (Phase 3)
+# =============================================================================
+
+import uuid as _uuid
+
+
+class ScrapeStateRequest(BaseModel):
+    states: list[str]
+    backfill: bool = False
+
+
+class ScrapeTierRequest(BaseModel):
+    tier: str  # "1" | "23" | "45" | "full"
+
+
+class StateOverrideRequest(BaseModel):
+    disabled: bool
+    reason: str | None = None
+
+
+def _is_scrape_running() -> bool:
+    """True if any scrape job is currently running OR any tier service is active.
+    Coarse but safe — refuses to start overlapping scrapes."""
+    row = db.query_one(
+        "SELECT 1 FROM ops.jobs WHERE status IN ('pending','running') "
+        "AND kind IN ('scrape_state','scrape_tier','backfill_state') LIMIT 1"
+    )
+    if row:
+        return True
+    try:
+        out = subprocess.run(
+            ["systemctl", "is-active", "osb-scrape-tier1.service",
+             "osb-scrape-tier23.service", "osb-scrape-tier45.service",
+             "osb-scrape-full.service"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return any(line.strip() in ("active", "activating") for line in out.stdout.splitlines())
+    except Exception:
+        return False
+
+
+def _spawn_job(*, kind: str, params: dict, actor: str, args: list[str]) -> str:
+    """Insert ops.jobs row, kick off systemd-run, return job_id."""
+    job_id = str(_uuid.uuid4())
+    unit = f"osb-ops-job-{job_id[:8]}.service"
+    with db.conn_cursor() as (_, cur):
+        cur.execute(
+            "INSERT INTO ops.jobs (id, kind, params, actor, systemd_unit) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (job_id, kind, json.dumps(params), actor, unit),
+        )
+        cur.execute(
+            "INSERT INTO ops.audit_log (actor, action, params) VALUES (%s, %s, %s)",
+            (actor, f"job_start:{kind}", json.dumps({**params, "job_id": job_id})),
+        )
+
+    cmd = [
+        "systemd-run",
+        f"--unit={unit}",
+        "--collect",
+        "--description", f"ops job {kind} ({actor})",
+        f"--setenv=OPS_TRIGGERED_BY=manual:{actor}",
+        f"--setenv=OPS_SYSTEMD_UNIT={unit}",
+        "--working-directory=/srv/osb-trackerv0",
+        "/srv/osb-trackerv0/.venv/bin/python",
+        "/srv/osb-trackerv0/scripts/run_ops_job.py",
+        job_id, kind, *args,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if proc.returncode != 0:
+        # Mark the job failed immediately so the UI doesn't spin forever
+        with db.conn_cursor() as (_, cur):
+            cur.execute(
+                "UPDATE ops.jobs SET status = 'failed', exit_code = %s, "
+                "error_text = %s, finished_at = now() WHERE id = %s",
+                (proc.returncode, (proc.stderr or proc.stdout)[:500], job_id),
+            )
+        raise HTTPException(status_code=500,
+                            detail=f"systemd-run failed (rc={proc.returncode}): "
+                                   f"{(proc.stderr or proc.stdout)[:200]}")
+    return job_id
+
+
+@app.post("/actions/scrape-state")
+def action_scrape_state(body: ScrapeStateRequest, user: str = Depends(require_user)):
+    states = [s.strip().upper() for s in body.states if s.strip()]
+    if not states:
+        raise HTTPException(status_code=400, detail="states list cannot be empty")
+    for s in states:
+        if s not in STATE_REGISTRY:
+            raise HTTPException(status_code=400, detail=f"unknown state {s}")
+    if _is_scrape_running():
+        raise HTTPException(status_code=409,
+                            detail="another scrape job is already running")
+    job_id = _spawn_job(
+        kind="backfill_state" if body.backfill else "scrape_state",
+        params={"states": states, "backfill": body.backfill},
+        actor=user,
+        args=["--states", " ".join(states)] + (["--backfill"] if body.backfill else []),
+    )
+    return {"job_id": job_id, "states": states, "backfill": body.backfill}
+
+
+@app.post("/actions/scrape-tier")
+def action_scrape_tier(body: ScrapeTierRequest, user: str = Depends(require_user)):
+    if body.tier not in ("1", "23", "45", "full"):
+        raise HTTPException(status_code=400, detail="tier must be 1|23|45|full")
+    if _is_scrape_running():
+        raise HTTPException(status_code=409,
+                            detail="another scrape job is already running")
+    job_id = _spawn_job(
+        kind="scrape_tier",
+        params={"tier": body.tier},
+        actor=user,
+        args=["--tier", body.tier],
+    )
+    return {"job_id": job_id, "tier": body.tier}
+
+
+@app.post("/states/{code}/override")
+def state_override(code: str, body: StateOverrideRequest, user: str = Depends(require_user)):
+    code = code.upper()
+    if code not in STATE_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"unknown state {code}")
+    with db.conn_cursor() as (_, cur):
+        cur.execute(
+            """
+            INSERT INTO ops.state_overrides (state, disabled, reason, set_by, set_at)
+            VALUES (%s, %s, %s, %s, now())
+            ON CONFLICT (state) DO UPDATE
+              SET disabled = EXCLUDED.disabled,
+                  reason   = EXCLUDED.reason,
+                  set_by   = EXCLUDED.set_by,
+                  set_at   = now()
+            """,
+            (code, body.disabled, body.reason, user),
+        )
+        cur.execute(
+            "INSERT INTO ops.audit_log (actor, action, params) VALUES (%s, %s, %s)",
+            (user, "state_override",
+             json.dumps({"state": code, "disabled": body.disabled, "reason": body.reason})),
+        )
+    return {"state": code, "disabled": body.disabled, "reason": body.reason}
+
+
+@app.get("/jobs")
+def list_jobs(user: str = Depends(require_user), limit: int = Query(50, le=500),
+              status_filter: str | None = Query(None, alias="status")):
+    where, params = "", ()
+    if status_filter:
+        where = "WHERE status = %s"
+        params = (status_filter,)
+    rows = db.query_all(
+        f"""
+        SELECT id, kind, params, status, actor, created_at, started_at,
+               finished_at, exit_code, systemd_unit, run_id, error_text
+          FROM ops.jobs
+          {where}
+         ORDER BY created_at DESC
+         LIMIT %s
+        """,
+        (*params, limit),
+    )
+    return {"jobs": rows}
+
+
+@app.get("/jobs/{job_id}")
+def job_detail(job_id: str, user: str = Depends(require_user)):
+    job = db.query_one(
+        "SELECT * FROM ops.jobs WHERE id = %s",
+        (job_id,),
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    # If the job is still running, fetch fresh journalctl output for live tail.
+    if job.get("status") == "running" and job.get("systemd_unit"):
+        try:
+            out = subprocess.run(
+                ["journalctl", "-u", job["systemd_unit"], "--no-pager",
+                 "--output=cat", "-n", "300"],
+                capture_output=True, text=True, timeout=10,
+            )
+            job["live_tail"] = (out.stdout or "")[-32_000:]
+        except Exception as e:
+            job["live_tail"] = f"(journalctl failed: {e})"
+
+    return {"job": job}
+
+
+# =============================================================================
 # Source-page health
 # =============================================================================
 

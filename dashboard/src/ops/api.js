@@ -90,4 +90,16 @@ export const api = {
     request(`/suppression-rules/${id}`, { method: 'DELETE' }),
   sources:           () => request('/sources'),
   sourceHistory: (code) => request(`/sources/${code}`),
+  scrapeState: (states, backfill = false) =>
+    request('/actions/scrape-state', { method: 'POST', body: { states, backfill } }),
+  scrapeTier: (tier) =>
+    request('/actions/scrape-tier', { method: 'POST', body: { tier } }),
+  setStateOverride: (code, disabled, reason) =>
+    request(`/states/${code}/override`, { method: 'POST', body: { disabled, reason } }),
+  jobs: ({ limit = 50, status } = {}) => {
+    const qs = new URLSearchParams({ limit });
+    if (status) qs.set('status', status);
+    return request(`/jobs?${qs}`);
+  },
+  job: (id) => request(`/jobs/${id}`),
 };
