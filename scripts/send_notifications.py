@@ -22,6 +22,7 @@ ROOT = Path(__file__).parent.parent
 SUBSCRIBERS_FILE = ROOT / "config" / "subscribers.json"
 SUMMARY_JSON = Path("/tmp/scrape_summary.json")
 SUMMARY_TXT = Path("/tmp/scrape_summary.txt")
+RUN_STATE_DIR = ROOT / "data" / "run_state"
 
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
@@ -258,16 +259,49 @@ def send_email(to_email, subject, html_body, text_body):
         return False
 
 
+def states_with_new_data():
+    """Return the set of states that actually got new rows in the current run.
+
+    Reads data/run_state/<STATE>.json sidecars written by base_scraper. A
+    state qualifies if rows_new > 0 (regardless of status — a partial parse
+    can still bring fresh rows). Returns an empty set if no sidecars exist
+    (e.g. when this script is invoked outside a tier run).
+    """
+    if not RUN_STATE_DIR.exists():
+        return set()
+    out = set()
+    for path in RUN_STATE_DIR.glob("*.json"):
+        try:
+            with open(path) as f:
+                d = json.load(f)
+            if (d.get("rows_new") or 0) > 0:
+                out.add(d.get("state", path.stem).upper())
+        except Exception:
+            continue
+    return out
+
+
 def main():
     summary = load_summary()
     if not summary:
         print("No summary data available, exiting")
         sys.exit(0)
 
+    new_data_states = states_with_new_data()
+    if not new_data_states:
+        print("No states had new data this run — skipping notification email.")
+        sys.exit(0)
+
     subscribers = load_subscribers()
     if not subscribers:
         print("No subscribers configured, exiting")
         sys.exit(0)
+
+    # Filter the summary down to only states that actually got new rows.
+    summary["states"] = {sc: s for sc, s in summary.get("states", {}).items() if sc in new_data_states}
+    summary["updated_states"] = sorted(new_data_states & set(summary.get("updated_states", [])) or new_data_states)
+    summary["total_handle"] = sum((s.get("handle") or 0) for s in summary["states"].values())
+    summary["total_ggr"]    = sum((s.get("ggr")    or 0) for s in summary["states"].values())
 
     # Load text summary as fallback
     text_summary = ""
