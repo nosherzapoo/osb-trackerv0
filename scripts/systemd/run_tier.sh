@@ -39,7 +39,11 @@ fi
 
 echo "[$START_TS] tier=$TIER states: $STATES"
 
+RUN_ID=$("$PY" scripts/ops_log.py begin --tier "tier${TIER}" --states "$STATES" --triggered-by "${OPS_TRIGGERED_BY:-systemd}" 2>/dev/null || echo "")
+[ -n "$RUN_ID" ] && echo "ops run_id=$RUN_ID"
+
 "$PY" scripts/run_states.py $STATES
+RUN_STATES_RC=$?
 "$PY" scripts/sync_to_dashboard.py
 "$PY" scripts/generate_summary.py || echo "generate_summary failed (continuing)"
 "$PY" scripts/load_to_postgres.py $STATES || echo "load_to_postgres failed (continuing)"
@@ -53,11 +57,18 @@ git add \
     .state_watermarks.json \
     .source_hashes.json 2>/dev/null || true
 
+COMMIT_SHA=""
 if ! git diff --cached --quiet; then
     git -c user.email='vps@osbdata.com' -c user.name='OSB VPS' \
         commit -m "data: tier $TIER update $STAMP" || true
+    COMMIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo "")
     git pull --rebase --autostash || echo "post-commit pull failed (continuing)"
     git push || echo "git push failed"
+fi
+
+if [ -n "$RUN_ID" ]; then
+    "$PY" scripts/ops_log.py finish --run-id "$RUN_ID" --exit-code "$RUN_STATES_RC" \
+        ${COMMIT_SHA:+--commit-sha "$COMMIT_SHA"} || echo "ops_log finish failed (continuing)"
 fi
 
 echo "[$START_TS] tier=$TIER done"

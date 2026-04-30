@@ -4,6 +4,7 @@ node_modules/
 __pycache__/
 .env
 data/raw/
+data/run_state/
 logs/
 dashboard/dist/
 research/screenshots/

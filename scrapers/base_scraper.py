@@ -303,6 +303,12 @@ class BaseStateScraper(ABC):
 
     def run(self, backfill: bool = False) -> pd.DataFrame:
         """Main entry point. Discovers, downloads, parses, normalizes, validates."""
+        from pipeline.run_sidecar import write_sidecar, now_iso
+        import time as _time
+
+        run_started_iso = now_iso()
+        run_started = _time.time()
+
         self.logger.info(f"Starting {self.state_code} scraper (backfill={backfill})")
 
         periods = self.discover_periods()
@@ -314,6 +320,15 @@ class BaseStateScraper(ABC):
 
         if not periods:
             self.logger.info("No periods to process")
+            write_sidecar(
+                self.state_code,
+                status="no_new_data",
+                started_at=run_started_iso,
+                rows_total=0,
+                rows_new=0,
+                elapsed_sec=round(_time.time() - run_started, 2),
+                metadata={"reason": "no_new_periods", "backfill": backfill},
+            )
             return pd.DataFrame(columns=STANDARD_COLUMNS)
 
         all_data = []
@@ -345,9 +360,20 @@ class BaseStateScraper(ABC):
 
         if not all_data:
             self.logger.warning("No data parsed across all periods")
+            write_sidecar(
+                self.state_code,
+                status="empty",
+                started_at=run_started_iso,
+                rows_total=0,
+                rows_new=0,
+                elapsed_sec=round(_time.time() - run_started, 2),
+                error_text="No data parsed across all periods",
+                metadata={"periods_attempted": len(periods), "backfill": backfill},
+            )
             return pd.DataFrame(columns=STANDARD_COLUMNS)
 
         combined = pd.concat(all_data, ignore_index=True)
+        rows_parsed = len(combined)
 
         processed_dir = Path("data/processed")
         processed_dir.mkdir(parents=True, exist_ok=True)
@@ -355,12 +381,14 @@ class BaseStateScraper(ABC):
 
         # Merge with existing history unless this is a full backfill rebuild.
         # _validate_full_dataset handles dedup (keep='last' preserves new rows).
+        existing_row_count = 0
         if not backfill and output_path.exists():
             try:
                 existing = pd.read_csv(output_path, low_memory=False)
                 # Drop prior monthly aggregations — they'll be regenerated below
                 if 'source_file' in existing.columns:
                     existing = existing[existing['source_file'] != 'aggregated_from_weekly']
+                existing_row_count = len(existing)
                 combined = pd.concat([existing, combined], ignore_index=True)
             except Exception as e:
                 self.logger.warning(f"Could not merge with existing CSV: {e}")
@@ -391,6 +419,7 @@ class BaseStateScraper(ABC):
         self.logger.info(f"Complete: {len(combined)} total rows ({period_counts})")
 
         # Run anomaly detection after every scrape
+        anomaly_payload: list[dict] = []
         try:
             from pipeline.anomaly_check import AnomalyChecker
             checker = AnomalyChecker(self.state_code)
@@ -407,8 +436,52 @@ class BaseStateScraper(ABC):
                 )
             else:
                 self.logger.info("Anomaly check: CLEAN")
+            for sev_label, bucket in (("high", result.high), ("medium", result.medium), ("low", getattr(result, "low", []))):
+                for a in bucket or []:
+                    anomaly_payload.append({
+                        "check": getattr(a, "check", None),
+                        "severity": sev_label,
+                        "message": getattr(a, "message", None),
+                        "period": str(getattr(a, "period", "") or "") or None,
+                        "details": getattr(a, "details", None),
+                    })
         except Exception as e:
             self.logger.debug(f"Anomaly check skipped: {e}")
+
+        # Compute period_latest from the saved CSV (excludes weekly aggregations).
+        period_latest = None
+        period_type_latest = None
+        try:
+            real = combined
+            if 'source_file' in real.columns:
+                real = real[real['source_file'] != 'aggregated_from_weekly']
+            if not real.empty and 'period_end' in real.columns:
+                period_latest = str(real['period_end'].max())
+                if 'period_type' in real.columns:
+                    latest_rows = real[real['period_end'] == period_latest]
+                    if not latest_rows.empty:
+                        period_type_latest = str(latest_rows['period_type'].iloc[0])
+        except Exception:
+            pass
+
+        rows_new = max(0, len(combined) - existing_row_count) if existing_row_count else len(combined)
+        write_sidecar(
+            self.state_code,
+            status="ok" if rows_new > 0 else "no_new_data",
+            started_at=run_started_iso,
+            rows_total=len(combined),
+            rows_new=rows_new,
+            period_latest=period_latest,
+            period_type=period_type_latest,
+            elapsed_sec=round(_time.time() - run_started, 2),
+            anomalies=anomaly_payload,
+            metadata={
+                "backfill": backfill,
+                "periods_processed": len(periods),
+                "rows_parsed_this_run": rows_parsed,
+                "existing_row_count": existing_row_count,
+            },
+        )
 
         return combined
 

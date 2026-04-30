@@ -20,6 +20,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from scrapers.config import STATE_REGISTRY
+from pipeline.run_sidecar import write_sidecar, now_iso
 
 PROCESSED_DIR = Path(__file__).parent.parent / "data" / "processed"
 WATERMARK_FILE = Path(__file__).parent.parent / ".state_watermarks.json"
@@ -78,6 +79,7 @@ def run_state(state_code, backfill=False):
     module_name = f"scrapers.{state_code.lower()}_scraper"
     class_name = f"{state_code}Scraper"
     start = time.time()
+    started_iso = now_iso()
 
     try:
         signal.signal(signal.SIGALRM, timeout_handler)
@@ -95,11 +97,29 @@ def run_state(state_code, backfill=False):
 
     except TimeoutError:
         signal.alarm(0)
-        return (None, time.time() - start, "TIMEOUT")
+        elapsed = time.time() - start
+        write_sidecar(
+            state_code,
+            status="timeout",
+            started_at=started_iso,
+            elapsed_sec=round(elapsed, 2),
+            error_text=f"Scraper exceeded {PER_STATE_TIMEOUT}s timeout",
+            metadata={"backfill": backfill},
+        )
+        return (None, elapsed, "TIMEOUT")
 
     except Exception as e:
         signal.alarm(0)
-        return (None, time.time() - start, str(e)[:200])
+        elapsed = time.time() - start
+        write_sidecar(
+            state_code,
+            status="failed",
+            started_at=started_iso,
+            elapsed_sec=round(elapsed, 2),
+            error_text=str(e)[:1000],
+            metadata={"backfill": backfill, "exception_type": type(e).__name__},
+        )
+        return (None, elapsed, str(e)[:200])
 
 
 def main():
