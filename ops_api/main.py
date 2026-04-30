@@ -486,7 +486,8 @@ def list_anomalies(
         params.append(state.upper())
     sql = f"""
         SELECT id, run_id, state, check_name, severity, period, message,
-               details, detected_at, status, acked_by, acked_at
+               details, detected_at, status, acked_by, acked_at,
+               suppressed_by_rule_id
           FROM ops.anomalies
          WHERE {' AND '.join(where)}
          ORDER BY detected_at DESC
@@ -494,6 +495,227 @@ def list_anomalies(
     """
     params.append(limit)
     return {"anomalies": db.query_all(sql, tuple(params))}
+
+
+class AckRequest(BaseModel):
+    note: str | None = None
+
+
+@app.post("/anomalies/{anomaly_id}/ack")
+def ack_anomaly(anomaly_id: int, body: AckRequest = AckRequest(),
+                user: str = Depends(require_user)):
+    with db.conn_cursor() as (_, cur):
+        cur.execute(
+            """
+            UPDATE ops.anomalies
+               SET status = 'acked', acked_by = %s, acked_at = now()
+             WHERE id = %s
+             RETURNING id, status
+            """,
+            (user, anomaly_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="anomaly not found")
+        cur.execute(
+            "INSERT INTO ops.audit_log (actor, action, params) VALUES (%s, %s, %s)",
+            (user, "anomaly_ack", json.dumps({"anomaly_id": anomaly_id, "note": body.note})),
+        )
+    return row
+
+
+@app.post("/anomalies/{anomaly_id}/resolve")
+def resolve_anomaly(anomaly_id: int, body: AckRequest = AckRequest(),
+                    user: str = Depends(require_user)):
+    with db.conn_cursor() as (_, cur):
+        cur.execute(
+            """
+            UPDATE ops.anomalies
+               SET status = 'resolved', acked_by = %s, acked_at = now()
+             WHERE id = %s
+             RETURNING id, status
+            """,
+            (user, anomaly_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="anomaly not found")
+        cur.execute(
+            "INSERT INTO ops.audit_log (actor, action, params) VALUES (%s, %s, %s)",
+            (user, "anomaly_resolve", json.dumps({"anomaly_id": anomaly_id, "note": body.note})),
+        )
+    return row
+
+
+# =============================================================================
+# Anomaly suppression rules
+# =============================================================================
+
+
+class SuppressionRuleIn(BaseModel):
+    state: str | None = None
+    check_name: str | None = None
+    pattern: str | None = None
+    operator_pattern: str | None = None
+    period_before: str | None = None
+    reason: str
+    apply_to_existing: bool = True
+    suppress_anomaly_id: int | None = None  # for "suppress this anomaly" UI
+
+
+@app.get("/suppression-rules")
+def list_suppression_rules(user: str = Depends(require_user)):
+    return {
+        "rules": db.query_all(
+            "SELECT id, state, check_name, pattern, operator_pattern, "
+            "period_before, reason, created_at, created_by "
+            "FROM ops.suppression_rules ORDER BY created_at DESC"
+        )
+    }
+
+
+@app.post("/suppression-rules")
+def create_suppression_rule(body: SuppressionRuleIn, user: str = Depends(require_user)):
+    if not body.reason:
+        raise HTTPException(status_code=400, detail="reason is required")
+
+    with db.conn_cursor() as (_, cur):
+        cur.execute(
+            """
+            INSERT INTO ops.suppression_rules
+                (state, check_name, pattern, operator_pattern, period_before, reason, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                body.state.upper() if body.state else None,
+                body.check_name,
+                body.pattern,
+                body.operator_pattern,
+                body.period_before,
+                body.reason,
+                user,
+            ),
+        )
+        rule_id = cur.fetchone()["id"]
+
+        affected = 0
+        if body.apply_to_existing:
+            # Mark currently-open anomalies that match this rule as suppressed.
+            where = ["status = 'open'"]
+            params: list = []
+            if body.state:
+                where.append("state = %s")
+                params.append(body.state.upper())
+            if body.check_name:
+                where.append("check_name = %s")
+                params.append(body.check_name)
+            if body.pattern:
+                where.append("LOWER(message) LIKE %s")
+                params.append(f"%{body.pattern.lower()}%")
+            if body.operator_pattern:
+                where.append("LOWER(message) LIKE %s")
+                params.append(f"%{body.operator_pattern.lower()}%")
+            if body.period_before:
+                where.append("period <= %s")
+                params.append(body.period_before)
+            cur.execute(
+                f"""
+                UPDATE ops.anomalies
+                   SET status = 'suppressed', suppressed_by_rule_id = %s
+                 WHERE {' AND '.join(where)}
+                """,
+                (rule_id, *params),
+            )
+            affected = cur.rowcount
+
+        cur.execute(
+            "INSERT INTO ops.audit_log (actor, action, params, result) "
+            "VALUES (%s, %s, %s, %s)",
+            (user, "suppression_rule_create",
+             json.dumps(body.dict()),
+             json.dumps({"rule_id": rule_id, "anomalies_suppressed": affected})),
+        )
+    return {"rule_id": rule_id, "anomalies_suppressed": affected}
+
+
+@app.delete("/suppression-rules/{rule_id}")
+def delete_suppression_rule(rule_id: int, user: str = Depends(require_user)):
+    with db.conn_cursor() as (_, cur):
+        cur.execute("DELETE FROM ops.suppression_rules WHERE id = %s RETURNING id", (rule_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="rule not found")
+        cur.execute(
+            "INSERT INTO ops.audit_log (actor, action, params) VALUES (%s, %s, %s)",
+            (user, "suppression_rule_delete", json.dumps({"rule_id": rule_id})),
+        )
+    return {"deleted": rule_id}
+
+
+# =============================================================================
+# Source-page health
+# =============================================================================
+
+
+@app.get("/sources")
+def list_sources(user: str = Depends(require_user)):
+    """One row per state: latest probe + how long the content hash has been static."""
+    rows = db.query_all(
+        """
+        WITH latest AS (
+          SELECT DISTINCT ON (state)
+                 state, url, http_code, content_hash, content_bytes,
+                 error_text, checked_at
+            FROM ops.source_health
+           ORDER BY state, checked_at DESC
+        ),
+        last_change AS (
+          -- Find the most-recent probe whose hash differs from the current one,
+          -- so we can show "hash unchanged since X".
+          SELECT s.state,
+                 (SELECT MIN(p.checked_at)
+                    FROM ops.source_health p
+                   WHERE p.state = s.state
+                     AND p.content_hash = s.content_hash
+                     AND p.checked_at <= s.checked_at) AS hash_first_seen,
+                 (SELECT COUNT(*)
+                    FROM ops.source_health p
+                   WHERE p.state = s.state
+                     AND p.content_hash = s.content_hash) AS probes_with_same_hash
+            FROM latest s
+        )
+        SELECT l.state, l.url, l.http_code, l.content_hash, l.content_bytes,
+               l.error_text, l.checked_at,
+               c.hash_first_seen, c.probes_with_same_hash
+          FROM latest l
+          LEFT JOIN last_change c USING (state)
+         ORDER BY l.state
+        """
+    )
+    out = []
+    for r in rows:
+        meta = STATE_REGISTRY.get(r["state"], {})
+        out.append({**r, "name": meta.get("name", r["state"]), "tier": meta.get("tier")})
+    return {"sources": out, "as_of": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/sources/{code}")
+def source_history(code: str, user: str = Depends(require_user),
+                   limit: int = Query(50, le=500)):
+    code = code.upper()
+    rows = db.query_all(
+        """
+        SELECT id, url, http_code, content_hash, content_bytes,
+               error_text, checked_at
+          FROM ops.source_health
+         WHERE state = %s
+         ORDER BY checked_at DESC
+         LIMIT %s
+        """,
+        (code, limit),
+    )
+    return {"state": code, "history": rows}
 
 
 # =============================================================================

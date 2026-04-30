@@ -1,0 +1,14 @@
+[Unit]
+Description=OSB tracker — probe state regulator source pages (ops.source_health)
+After=network.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/srv/osb-trackerv0
+EnvironmentFile=/srv/osb-trackerv0/.env
+ExecStart=/srv/osb-trackerv0/.venv/bin/python /srv/osb-trackerv0/scripts/probe_sources.py
+TimeoutStartSec=10min
+StandardOutput=journal
+StandardError=journal

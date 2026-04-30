@@ -465,6 +465,31 @@
   font-size: 12px;
 }
 
+/* ── Inbox actions + suppression modal ────────────────── */
+.ops-row-actions { display: flex; gap: 4px; }
+.ops-btn.ops-btn-sm {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+.ops-modal {
+  width: 460px;
+  max-width: 100vw;
+  margin: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-lg);
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: var(--shadow-lg);
+}
+.ops-drawer-backdrop:has(.ops-modal) { align-items: center; justify-content: center; }
+.ops-modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+
+.ops-link { color: var(--accent-primary); text-decoration: none; }
+.ops-link:hover { text-decoration: underline; }
+
 /* ── Misc ─────────────────────────────────────────────── */
 .ops-mono { font-family: var(--font-mono); }
 .ops-small { font-size: 11px; }

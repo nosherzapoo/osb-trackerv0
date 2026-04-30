@@ -40,7 +40,7 @@ async function request(path, { method = 'GET', body, auth = true } = {}) {
   const resp = await fetch(`${API_BASE}${path}`, {
     method,
     headers,
-    body: body ? JSON.stringify(body) : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   if (resp.status === 401) {
     clearToken();
@@ -79,4 +79,15 @@ export const api = {
     return request(`/anomalies?${qs}`);
   },
   audit: (limit = 100) => request(`/audit?limit=${limit}`),
+  ackAnomaly: (id, note) =>
+    request(`/anomalies/${id}/ack`, { method: 'POST', body: { note } }),
+  resolveAnomaly: (id, note) =>
+    request(`/anomalies/${id}/resolve`, { method: 'POST', body: { note } }),
+  listSuppressionRules: () => request('/suppression-rules'),
+  createSuppressionRule: (rule) =>
+    request('/suppression-rules', { method: 'POST', body: rule }),
+  deleteSuppressionRule: (id) =>
+    request(`/suppression-rules/${id}`, { method: 'DELETE' }),
+  sources:           () => request('/sources'),
+  sourceHistory: (code) => request(`/sources/${code}`),
 };

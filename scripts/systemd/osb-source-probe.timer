@@ -1,0 +1,12 @@
+[Unit]
+Description=OSB tracker — source-page probe (every 30 min)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+RandomizedDelaySec=60
+Persistent=true
+Unit=osb-source-probe.service
+
+[Install]
+WantedBy=timers.target

@@ -85,6 +85,50 @@ def _coerce_date(val):
         return None
 
 
+def _load_suppression_rules(cur) -> list[dict]:
+    """Load all active suppression rules so anomaly inserts can self-suppress."""
+    cur.execute(
+        """
+        SELECT id, state, check_name, pattern, operator_pattern, period_before, reason
+          FROM ops.suppression_rules
+        """
+    )
+    cols = [d.name for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _matching_rule(rules: list[dict], *, state: str, check_name: str,
+                   message: str | None, period: str | None) -> dict | None:
+    """Return the first rule that matches this anomaly, or None.
+
+    A rule matches if every populated field matches. NULL/empty fields on the
+    rule are wildcards. `pattern` and `operator_pattern` are case-insensitive
+    substring checks against the message.
+    """
+    msg_l = (message or "").lower()
+    period_d = None
+    if period:
+        s = str(period)[:10]
+        try:
+            from datetime import datetime as _dt
+            period_d = _dt.strptime(s, "%Y-%m-%d").date()
+        except ValueError:
+            period_d = None
+    for r in rules:
+        if r.get("state") and r["state"].upper() != state.upper():
+            continue
+        if r.get("check_name") and r["check_name"] != check_name:
+            continue
+        if r.get("pattern") and r["pattern"].lower() not in msg_l:
+            continue
+        if r.get("operator_pattern") and r["operator_pattern"].lower() not in msg_l:
+            continue
+        if r.get("period_before") and (period_d is None or period_d > r["period_before"]):
+            continue
+        return r
+    return None
+
+
 def cmd_finish(args):
     sidecars = _read_sidecars()
 
@@ -99,8 +143,11 @@ def cmd_finish(args):
 
     states_inserted = 0
     anomalies_inserted = 0
+    anomalies_suppressed = 0
 
     with get_conn() as conn, conn.cursor() as cur:
+        suppression_rules = _load_suppression_rules(cur)
+
         for r in sidecars:
             cur.execute(
                 """
@@ -128,23 +175,43 @@ def cmd_finish(args):
             states_inserted += 1
 
             for a in r.get("anomalies") or []:
+                check_name = a.get("check") or a.get("check_name") or "unknown"
+                severity = (a.get("severity") or "medium").lower()
+                period_str = _coerce_date(a.get("period"))
+                message = a.get("message")
+
+                rule = _matching_rule(
+                    suppression_rules,
+                    state=r.get("state") or "",
+                    check_name=check_name,
+                    message=message,
+                    period=period_str,
+                )
+                init_status = "suppressed" if rule else "open"
+                rule_id = rule["id"] if rule else None
+
                 cur.execute(
                     """
                     INSERT INTO ops.anomalies
-                        (run_id, state, check_name, severity, period, message, details)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        (run_id, state, check_name, severity, period, message,
+                         details, status, suppressed_by_rule_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         args.run_id,
                         r.get("state"),
-                        a.get("check") or a.get("check_name") or "unknown",
-                        (a.get("severity") or "medium").lower(),
-                        _coerce_date(a.get("period")),
-                        a.get("message"),
+                        check_name,
+                        severity,
+                        period_str,
+                        message,
                         json.dumps(a.get("details") or {}),
+                        init_status,
+                        rule_id,
                     ),
                 )
                 anomalies_inserted += 1
+                if rule:
+                    anomalies_suppressed += 1
 
         cur.execute(
             """
@@ -167,6 +234,7 @@ def cmd_finish(args):
     print(
         f"ops_log finish: run_id={args.run_id} "
         f"states={states_inserted} anomalies={anomalies_inserted} "
+        f"(suppressed={anomalies_suppressed}) "
         f"exit_code={args.exit_code}"
     )
 
