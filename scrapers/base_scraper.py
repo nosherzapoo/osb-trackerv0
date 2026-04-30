@@ -359,17 +359,49 @@ class BaseStateScraper(ABC):
                 continue
 
         if not all_data:
-            self.logger.warning("No data parsed across all periods")
-            write_sidecar(
-                self.state_code,
-                status="empty",
-                started_at=run_started_iso,
-                rows_total=0,
-                rows_new=0,
-                elapsed_sec=round(_time.time() - run_started, 2),
-                error_text="No data parsed across all periods",
-                metadata={"periods_attempted": len(periods), "backfill": backfill},
-            )
+            # Distinguish two cases:
+            #   - No existing CSV on disk → genuine first-run failure (status=empty)
+            #   - Existing CSV present  → regulator just hasn't published the
+            #     periods we discovered yet (status=no_new_data); the existing
+            #     dataset is preserved untouched on disk.
+            existing_csv_path = Path(f"data/processed/{self.state_code}.csv")
+            existing_count = 0
+            if existing_csv_path.exists():
+                try:
+                    existing_count = sum(1 for _ in open(existing_csv_path)) - 1
+                except Exception:
+                    existing_count = 0
+
+            if existing_count > 0:
+                self.logger.info(
+                    f"Discovered {len(periods)} periods, none yielded rows — "
+                    f"likely not yet published. Existing CSV preserved ({existing_count:,} rows)."
+                )
+                write_sidecar(
+                    self.state_code,
+                    status="no_new_data",
+                    started_at=run_started_iso,
+                    rows_total=existing_count,
+                    rows_new=0,
+                    elapsed_sec=round(_time.time() - run_started, 2),
+                    metadata={
+                        "reason": "discovered_periods_not_yet_published",
+                        "periods_attempted": len(periods),
+                        "backfill": backfill,
+                    },
+                )
+            else:
+                self.logger.warning("No data parsed across all periods (no existing CSV)")
+                write_sidecar(
+                    self.state_code,
+                    status="empty",
+                    started_at=run_started_iso,
+                    rows_total=0,
+                    rows_new=0,
+                    elapsed_sec=round(_time.time() - run_started, 2),
+                    error_text="No data parsed across all periods",
+                    metadata={"periods_attempted": len(periods), "backfill": backfill},
+                )
             return pd.DataFrame(columns=STANDARD_COLUMNS)
 
         combined = pd.concat(all_data, ignore_index=True)
