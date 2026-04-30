@@ -65,6 +65,22 @@ def load_state(st: str) -> pd.DataFrame:
         & (df['operator_standard'].notna())
         & (~df['operator_standard'].str.upper().isin(['TOTAL', 'UNKNOWN', 'STATEWIDE', 'ALL']))
     ].copy()
+    # Several scrapers (MA, MI, OH, KS, NH, plus partial OH) populate
+    # gross_revenue from the regulator's published "GGR" column but never
+    # backfill standard_ggr because they don't capture payouts. For
+    # market-share purposes the regulator-published GGR is the canonical
+    # number and matches the published hold rate, so we coalesce it into
+    # standard_ggr when the latter is null.
+    df['standard_ggr'] = pd.to_numeric(df['standard_ggr'], errors='coerce')
+    if 'gross_revenue' in df.columns:
+        gr = pd.to_numeric(df['gross_revenue'], errors='coerce')
+        df['standard_ggr'] = df['standard_ggr'].fillna(gr)
+    # Strict integrity rule: every row in the analytical sheets needs both
+    # handle and a GGR figure. Otherwise hold-rate aggregates would mix a
+    # numerator from one set of rows with a denominator from another, which
+    # makes hold artificially low. Drop rows missing either.
+    handle_n = pd.to_numeric(df['handle'], errors='coerce')
+    df = df[handle_n.notna() & (handle_n > 0) & df['standard_ggr'].notna()].copy()
     return df[[
         'state_code', 'operator_standard', 'parent_company',
         'period_start', 'handle', 'standard_ggr', 'source_url',
@@ -420,10 +436,13 @@ def main():
         'Note': [
             'SCOPE: Online channel only. Retail and combined channels excluded.',
             'TIME WINDOW: All time (since each state\'s online launch).',
-            'STATES INCLUDED (21): AZ, CT, DC, IA, IL, IN, KS, KY, MA, MD, ME, MI, MO, NH, NJ, NY, OH, OR, PA, WV, WY.',
+            'STATES INCLUDED (20): AZ, CT, DC, IA, IL, IN, KS, KY, MA, MD, ME, MI, MO, NH, NY, OH, OR, PA, WV, WY.',
             'STATES EXCLUDED — no operator-level online breakdown: AR, CO, DE, LA, MS, MT, NC, NE, NV, RI, SD, TN, VA, VT.',
+            'STATE EXCLUDED — structural: NJ. NJ DGE publishes operator-level GGR (from tax returns) but not operator-level handle. Without handle, hold rate cannot be computed and the row would distort the GGR-only side of any aggregate. Excluded entirely until an alternate handle source is wired in.',
             'NH and OR are DraftKings monopolies (state-exclusive contracts) — all of each state\'s online handle/GGR rolls into the DraftKings bucket.',
             'ME is a tribal-compact 2-operator market (DraftKings + Caesars).',
+            'INTEGRITY RULE: every operator-month row must have BOTH a non-zero handle AND a GGR value. Rows missing either are dropped at load. This prevents hold-rate aggregates from mixing a numerator from one row-set with a denominator from another, which made hold artificially low in earlier versions of this workbook.',
+            'GGR FALLBACK: when standard_ggr is null but gross_revenue is populated, gross_revenue is coalesced in. Affects MA, MI, OH, KS, NH primarily — these scrapers don\'t capture payouts so standard_ggr never derives, but the regulator-published GGR (gross_revenue) is the same number and matches the published hold rate.',
             'BUCKETS (fixed): FanDuel, DraftKings, BetMGM, Fanatics, Caesars, ESPN Bet, Others. Barstool history is already merged into ESPN Bet via the upstream operator_standard mapping.',
             'GGR DEFINITION: standard_ggr = handle − payouts. Normalized across states.',
             'HOLD: GGR / Handle, computed at the bucket level.',
