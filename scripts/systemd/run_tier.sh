@@ -43,6 +43,7 @@ echo "[$START_TS] tier=$TIER states: $STATES"
 "$PY" scripts/sync_to_dashboard.py
 "$PY" scripts/generate_summary.py || echo "generate_summary failed (continuing)"
 "$PY" scripts/load_to_postgres.py $STATES || echo "load_to_postgres failed (continuing)"
+"$PY" scripts/send_notifications.py || echo "send_notifications failed (continuing)"
 
 git add \
     data/processed \
