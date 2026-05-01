@@ -24,7 +24,29 @@ from pipeline.run_sidecar import write_sidecar, now_iso
 
 PROCESSED_DIR = Path(__file__).parent.parent / "data" / "processed"
 WATERMARK_FILE = Path(__file__).parent.parent / ".state_watermarks.json"
+PG_PASS_FILE = Path("/root/.osb_pg_pass")
 PER_STATE_TIMEOUT = 180
+
+
+def fetch_disabled_states():
+    """Return {state_code: reason} for states marked disabled in ops.state_overrides.
+    Best-effort: returns {} if Postgres is unreachable (e.g. during local dev)."""
+    if not PG_PASS_FILE.exists():
+        return {}
+    try:
+        import psycopg
+        pw = PG_PASS_FILE.read_text().strip()
+        with psycopg.connect(
+            f"postgres://osb_writer:{pw}@127.0.0.1:5432/osb_data",
+            connect_timeout=5,
+        ) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT state, reason FROM ops.state_overrides WHERE disabled = TRUE"
+            )
+            return {state: reason for state, reason in cur.fetchall()}
+    except Exception as e:
+        print(f"  ops_overrides: failed to read disabled list ({e}), continuing", flush=True)
+        return {}
 
 
 class TimeoutError(Exception):
@@ -134,6 +156,10 @@ def main():
     print(f"Running {len(states)} state(s): {' '.join(states)}")
     print()
 
+    disabled = fetch_disabled_states()
+    if disabled:
+        print(f"  ops_overrides: {len(disabled)} state(s) disabled: {', '.join(sorted(disabled))}")
+
     watermarks = load_watermarks()
     changed_states = []
     failures = []
@@ -141,6 +167,18 @@ def main():
     for sc in states:
         if sc not in STATE_REGISTRY:
             print(f"  {sc}: unknown state, skipping")
+            continue
+
+        if sc in disabled:
+            reason = disabled.get(sc) or 'no reason given'
+            print(f"  {sc}: SKIPPED (disabled: {reason})")
+            write_sidecar(
+                sc,
+                status="skipped",
+                started_at=now_iso(),
+                error_text=f"state disabled in ops.state_overrides: {reason}",
+                metadata={"disabled_reason": reason},
+            )
             continue
 
         name = STATE_REGISTRY[sc].get('name', sc)

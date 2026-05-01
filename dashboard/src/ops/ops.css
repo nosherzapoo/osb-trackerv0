@@ -497,6 +497,13 @@
   border-top: 1px solid var(--border-subtle);
   padding-top: 8px;
 }
+.ops-tier-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
 .ops-btn-warn {
   border-color: var(--warning);
   color: var(--warning);

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from './api';
 import { fmtRelativeTime, fmtUtc, fmtDuration } from './format';
+import JobDrawer from './JobDrawer';
 
 const STATUS_BADGE = {
   ok: 'badge-ok',
@@ -11,11 +12,36 @@ const STATUS_BADGE = {
   skipped: 'badge-quiet',
 };
 
+const TIER_BUTTONS = [
+  { id: '1',    label: 'Run tier 1' },
+  { id: '23',   label: 'Run tier 2/3' },
+  { id: '45',   label: 'Run tier 4/5' },
+  { id: 'full', label: 'Run full backfill', confirm: true },
+];
+
 export default function Overview() {
   const [health, setHealth] = useState(null);
   const [timers, setTimers] = useState(null);
   const [runs, setRuns] = useState(null);
   const [error, setError] = useState(null);
+  const [activeJobId, setActiveJobId] = useState(null);
+  const [actionError, setActionError] = useState(null);
+
+  const runTier = async (tier, confirm) => {
+    setActionError(null);
+    if (confirm) {
+      const ok = window.confirm(
+        'Full backfill rescrapes every state from origin. Can run for hours and overlap timers — continue?'
+      );
+      if (!ok) return;
+    }
+    try {
+      const r = await api.scrapeTier(tier);
+      setActiveJobId(r.job_id);
+    } catch (e) {
+      setActionError(e.message);
+    }
+  };
 
   useEffect(() => {
     let alive = true;
@@ -69,6 +95,18 @@ export default function Overview() {
       </div>
 
       <h2 className="ops-section-title">Timers</h2>
+      <div className="ops-tier-actions">
+        {TIER_BUTTONS.map((b) => (
+          <button
+            key={b.id}
+            className={`ops-btn ops-btn-sm ${b.confirm ? 'ops-btn-warn' : ''}`}
+            onClick={() => runTier(b.id, b.confirm)}
+          >
+            {b.label}
+          </button>
+        ))}
+        {actionError && <span className="ops-warn ops-small">{actionError}</span>}
+      </div>
       <div className="ops-timer-grid">
         {(timers?.timers || []).map((t) => (
           <div className="ops-timer-card" key={t.unit}>
@@ -136,6 +174,8 @@ export default function Overview() {
           )}
         </tbody>
       </table>
+
+      {activeJobId && <JobDrawer jobId={activeJobId} onClose={() => setActiveJobId(null)} />}
     </div>
   );
 }
@@ -148,4 +188,10 @@ function HealthChip({ label, ok, value, sub }) {
       {sub && <div className="chip-sub">{sub}</div>}
     </div>
   );
+}
+
+// JobDrawer for tier-action triggers
+function _MaybeJobDrawer({ jobId, onClose }) {
+  if (!jobId) return null;
+  return <JobDrawer jobId={jobId} onClose={onClose} />;
 }
