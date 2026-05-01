@@ -1,8 +1,7 @@
 import { useState } from 'react';
 import { STATE_NAMES } from '../utils/colors';
 
-const API_BASE = 'https://yjrfmlcfvogsfodgmcfw.supabase.co/rest/v1';
-const API_KEY = 'sb_publishable_wnNbi50k0OtTabl5iXEEkg_-CvXA47g';
+const API_BASE = 'https://api.osbdata.com';
 
 const TABS = [
   { id: 'api', label: 'API Reference' },
@@ -98,26 +97,21 @@ function ApiReference() {
       <CodeBlock code={API_BASE + '/monthly_data'} />
 
       <h2 className="docs-h2">Authentication</h2>
-      <p className="docs-p">Include your API key in the <code>apikey</code> header with every request.</p>
-      <CodeBlock code={`apikey: ${API_KEY}`} />
+      <p className="docs-p">No authentication required. The API is read-only and rate-limited.</p>
 
       <h2 className="docs-h2">Query Examples</h2>
 
       <h3 className="docs-h3">Get latest data for a state</h3>
-      <CodeBlock language="bash" code={`curl "${API_BASE}/monthly_data?state_code=eq.NY&period_type=eq.monthly&order=period_end.desc&limit=20" \\
-  -H "apikey: ${API_KEY}"`} />
+      <CodeBlock language="bash" code={`curl "${API_BASE}/monthly_data?state_code=eq.NY&period_type=eq.monthly&order=period_end.desc&limit=20"`} />
 
       <h3 className="docs-h3">Get a specific operator across all states</h3>
-      <CodeBlock code={`curl "${API_BASE}/monthly_data?operator_standard=eq.FanDuel&period_type=eq.monthly&select=state_code,period_end,handle,standard_ggr&order=period_end.desc&limit=50" \\
-  -H "apikey: ${API_KEY}"`} />
+      <CodeBlock code={`curl "${API_BASE}/monthly_data?operator_standard=eq.FanDuel&period_type=eq.monthly&select=state_code,period_end,handle,standard_ggr&order=period_end.desc&limit=50"`} />
 
       <h3 className="docs-h3">Get data for a date range</h3>
-      <CodeBlock code={`curl "${API_BASE}/monthly_data?state_code=eq.PA&period_end=gte.2025-01-01&period_end=lte.2025-12-31&period_type=eq.monthly" \\
-  -H "apikey: ${API_KEY}"`} />
+      <CodeBlock code={`curl "${API_BASE}/monthly_data?state_code=eq.PA&period_end=gte.2025-01-01&period_end=lte.2025-12-31&period_type=eq.monthly"`} />
 
       <h3 className="docs-h3">Filter by channel</h3>
-      <CodeBlock code={`curl "${API_BASE}/monthly_data?state_code=eq.NJ&channel=eq.online&period_type=eq.monthly&limit=10" \\
-  -H "apikey: ${API_KEY}"`} />
+      <CodeBlock code={`curl "${API_BASE}/monthly_data?state_code=eq.NJ&channel=eq.online&period_type=eq.monthly&limit=10"`} />
 
       <h3 className="docs-h3">Python example</h3>
       <CodeBlock language="python" code={
@@ -131,24 +125,20 @@ resp = requests.get(
         "order": "period_end.desc",
         "limit": 20,
     },
-    headers={"apikey": "` + API_KEY + `"}
 )
 data = resp.json()
 for row in data:
-    handle = row["handle"] / 100  # cents to dollars
-    print(f'{row["operator_standard"]}: ${"{"}handle:,.0f{"}"}')`
+    print(f'{row["operator_standard"]}: ${"{"}row["handle"]:,.0f{"}"}')`
       } />
 
       <h3 className="docs-h3">JavaScript example</h3>
       <CodeBlock language="javascript" code={
 `const resp = await fetch(
-  '` + API_BASE + `/monthly_data?state_code=eq.NY&period_type=eq.monthly&order=period_end.desc&limit=20',
-  { headers: { apikey: '` + API_KEY + `' } }
+  '` + API_BASE + `/monthly_data?state_code=eq.NY&period_type=eq.monthly&order=period_end.desc&limit=20'
 );
 const data = await resp.json();
 data.forEach(row => {
-  const handle = row.handle / 100; // cents to dollars
-  console.log(row.operator_standard + ': $' + handle.toLocaleString());
+  console.log(row.operator_standard + ': $' + row.handle.toLocaleString());
 });`
       } />
 
