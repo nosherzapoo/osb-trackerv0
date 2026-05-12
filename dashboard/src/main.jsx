@@ -9,6 +9,7 @@ ReactGA.initialize('G-WJ6TQ113YS');
 import LandingPage from './components/LandingPage';
 import ApiAccessPage from './components/ApiAccessPage';
 import OpsApp from './ops/OpsApp';
+import MarketsApp from './markets/MarketsApp';
 import './styles.css';
 
 function StateRedirect() {
