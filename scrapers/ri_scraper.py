@@ -165,10 +165,17 @@ class RIScraper(BaseStateScraper):
         return None
 
     def download_report(self, period_info: dict) -> Path:
-        """Download an RI Sports Book Revenue PDF."""
+        """Download an RI Sports Book Revenue PDF.
+
+        Cache key fingerprints the URL's basename so that when the regulator
+        rotates the current-FY filename (Feb_*.pdf -> Mar_*.pdf -> Apr_*.pdf),
+        a fresh fetch is triggered automatically instead of replaying a stale
+        local copy.
+        """
         url = period_info["download_url"]
         fy = period_info["fy"]
-        filename = f"RI_FY{fy}.pdf"
+        url_name = url.rsplit("/", 1)[-1].replace("%20", "_")
+        filename = f"RI_FY{fy}_{url_name}"
         save_path = self.raw_dir / filename
 
         if not self._should_redownload(save_path):
