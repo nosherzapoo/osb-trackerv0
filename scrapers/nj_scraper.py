@@ -213,7 +213,13 @@ class NJScraper(BaseStateScraper):
             return df
 
         handle_df = pd.read_csv(handle_csv)
-        handle_df['period_end'] = pd.to_datetime(handle_df['period_end'])
+        # format='mixed' tolerates the historical mix of "YYYY-MM-DD" and
+        # "YYYY-MM-DD HH:MM:SS" strings that can appear in NJ_handle.csv after
+        # repeated backfills; coerce silently for any genuinely bad rows so
+        # the merger continues instead of swallowing the whole batch.
+        handle_df['period_end'] = pd.to_datetime(
+            handle_df['period_end'], format='mixed', errors='coerce'
+        )
 
         # Keep only retail/online channel rows with handle
         channel_handle = handle_df[
@@ -226,7 +232,9 @@ class NJScraper(BaseStateScraper):
             return df
 
         df = df.copy()
-        df['period_end'] = pd.to_datetime(df['period_end'])
+        df['period_end'] = pd.to_datetime(
+            df['period_end'], format='mixed', errors='coerce'
+        )
 
         # Strip individual operator handle (don't distribute — we don't have per-op handle)
         df['handle'] = pd.NA

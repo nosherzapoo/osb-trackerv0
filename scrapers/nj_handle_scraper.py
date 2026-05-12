@@ -106,6 +106,16 @@ class NJHandleScraper(BaseStateScraper):
             except Exception as e:
                 self.logger.warning(f"Could not merge with existing {output_path}: {e}")
 
+        # Normalize date columns to plain YYYY-MM-DD strings before any
+        # comparison or save. Without this, freshly-parsed rows save as
+        # "2026-02-28 00:00:00" while older rows save as "2026-02-28", and
+        # downstream `pd.to_datetime` calls choke on the mixed format.
+        for col in ("period_start", "period_end"):
+            if col in combined.columns:
+                combined[col] = pd.to_datetime(
+                    combined[col], format="mixed", errors="coerce"
+                ).dt.strftime("%Y-%m-%d")
+
         # Deduplicate — keep='last' wins so a re-scrape of a published period
         # supersedes the prior row (e.g., when the regulator revises figures).
         key_cols = ["state_code", "period_end", "channel", "sport_category", "period_type"]
