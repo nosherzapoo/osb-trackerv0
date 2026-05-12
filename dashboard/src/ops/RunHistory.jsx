@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from './api';
-import { fmtRelativeTime, fmtUtc, fmtDuration } from './format';
+import { fmtRelativeTime, fmtUtc, fmtDuration, triggerStyle } from './format';
 
 export default function RunHistory() {
   const [data, setData] = useState(null);
@@ -85,7 +85,9 @@ export default function RunHistory() {
                 </td>
                 <td className="ops-mono">{(r.rows_new_total || 0).toLocaleString()}</td>
                 <td className="ops-mono ops-small">{r.commit_sha ? r.commit_sha.slice(0, 7) : '—'}</td>
-                <td className="ops-muted ops-small">{r.triggered_by || '—'}</td>
+                <td>
+                  {(() => { const t = triggerStyle(r.triggered_by); return <span className={`ops-flag ${t.cls}`}>{t.label}</span>; })()}
+                </td>
               </tr>
             );
           })}

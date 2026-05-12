@@ -657,7 +657,8 @@ def delete_suppression_rule(rule_id: int, user: str = Depends(require_user)):
 # Manual override actions (Phase 3)
 # =============================================================================
 
-import uuid as _uuid
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import ops_jobs  # noqa: E402
 
 
 class ScrapeStateRequest(BaseModel):
@@ -674,67 +675,19 @@ class StateOverrideRequest(BaseModel):
     reason: str | None = None
 
 
-def _is_scrape_running() -> bool:
-    """True if any scrape job is currently running OR any tier service is active.
-    Coarse but safe — refuses to start overlapping scrapes."""
-    row = db.query_one(
-        "SELECT 1 FROM ops.jobs WHERE status IN ('pending','running') "
-        "AND kind IN ('scrape_state','scrape_tier','backfill_state') LIMIT 1"
-    )
-    if row:
-        return True
-    try:
-        out = subprocess.run(
-            ["systemctl", "is-active", "osb-scrape-tier1.service",
-             "osb-scrape-tier23.service", "osb-scrape-tier45.service",
-             "osb-scrape-full.service"],
-            capture_output=True, text=True, timeout=5,
-        )
-        return any(line.strip() in ("active", "activating") for line in out.stdout.splitlines())
-    except Exception:
-        return False
-
-
 def _spawn_job(*, kind: str, params: dict, actor: str, args: list[str]) -> str:
-    """Insert ops.jobs row, kick off systemd-run, return job_id."""
-    job_id = str(_uuid.uuid4())
-    unit = f"osb-ops-job-{job_id[:8]}.service"
-    with db.conn_cursor() as (_, cur):
-        cur.execute(
-            "INSERT INTO ops.jobs (id, kind, params, actor, systemd_unit) "
-            "VALUES (%s, %s, %s, %s, %s)",
-            (job_id, kind, json.dumps(params), actor, unit),
+    """Thin wrapper around ops_jobs.spawn_job so HTTPException is raised when
+    systemd-run fails. Manual triggers prefix the actor with 'manual:'."""
+    try:
+        return ops_jobs.spawn_job(
+            kind=kind, params=params, actor=f"manual:{actor}", args=args
         )
-        cur.execute(
-            "INSERT INTO ops.audit_log (actor, action, params) VALUES (%s, %s, %s)",
-            (actor, f"job_start:{kind}", json.dumps({**params, "job_id": job_id})),
-        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
 
-    cmd = [
-        "systemd-run",
-        f"--unit={unit}",
-        "--collect",
-        "--description", f"ops job {kind} ({actor})",
-        f"--setenv=OPS_TRIGGERED_BY=manual:{actor}",
-        f"--setenv=OPS_SYSTEMD_UNIT={unit}",
-        "--working-directory=/srv/osb-trackerv0",
-        "/srv/osb-trackerv0/.venv/bin/python",
-        "/srv/osb-trackerv0/scripts/run_ops_job.py",
-        job_id, kind, *args,
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    if proc.returncode != 0:
-        # Mark the job failed immediately so the UI doesn't spin forever
-        with db.conn_cursor() as (_, cur):
-            cur.execute(
-                "UPDATE ops.jobs SET status = 'failed', exit_code = %s, "
-                "error_text = %s, finished_at = now() WHERE id = %s",
-                (proc.returncode, (proc.stderr or proc.stdout)[:500], job_id),
-            )
-        raise HTTPException(status_code=500,
-                            detail=f"systemd-run failed (rc={proc.returncode}): "
-                                   f"{(proc.stderr or proc.stdout)[:200]}")
-    return job_id
+
+def _is_scrape_running() -> bool:
+    return ops_jobs.is_scrape_running()
 
 
 @app.post("/actions/scrape-state")

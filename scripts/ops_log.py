@@ -129,6 +129,25 @@ def _matching_rule(rules: list[dict], *, state: str, check_name: str,
     return None
 
 
+def _latest_source_hashes(cur, states: list[str]) -> dict[str, str | None]:
+    """Return {state: latest content_hash from ops.source_health} for the given
+    states. Used so each scrape_state_result records the source hash that was
+    current when the scrape ran — probe-driven triggers later compare against
+    this to decide if the regulator has actually moved."""
+    if not states:
+        return {}
+    cur.execute(
+        """
+        SELECT DISTINCT ON (state) state, content_hash
+          FROM ops.source_health
+         WHERE state = ANY(%s)
+         ORDER BY state, checked_at DESC
+        """,
+        (states,),
+    )
+    return {state: h for state, h in cur.fetchall()}
+
+
 def cmd_finish(args):
     sidecars = _read_sidecars()
 
@@ -147,6 +166,8 @@ def cmd_finish(args):
 
     with get_conn() as conn, conn.cursor() as cur:
         suppression_rules = _load_suppression_rules(cur)
+        sidecar_states = [r.get("state") for r in sidecars if r.get("state")]
+        latest_hashes = _latest_source_hashes(cur, sidecar_states)
 
         for r in sidecars:
             cur.execute(
@@ -154,8 +175,8 @@ def cmd_finish(args):
                 INSERT INTO ops.scrape_state_results
                     (run_id, state, started_at, finished_at, status,
                      rows_total, rows_new, period_latest, period_type,
-                     elapsed_sec, error_text, metadata)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     elapsed_sec, error_text, metadata, source_hash_at_scrape)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     args.run_id,
@@ -170,6 +191,7 @@ def cmd_finish(args):
                     r.get("elapsed_sec"),
                     r.get("error_text"),
                     json.dumps(r.get("metadata") or {}),
+                    latest_hashes.get(r.get("state")),
                 ),
             )
             states_inserted += 1

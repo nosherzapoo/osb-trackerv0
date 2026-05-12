@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from './api';
-import { fmtUtc, fmtRelativeTime, fmtDuration } from './format';
+import { fmtUtc, fmtRelativeTime, fmtDuration, triggerStyle } from './format';
 import JobDrawer from './JobDrawer';
 
 export default function Jobs() {
@@ -74,7 +74,9 @@ export default function Jobs() {
                       {j.status}
                     </span>
                   </td>
-                  <td className="ops-muted ops-small">{j.actor}</td>
+                  <td>
+                    {(() => { const t = triggerStyle(j.actor); return <span className={`ops-flag ${t.cls}`}>{t.label}</span>; })()}
+                  </td>
                   <td>{fmtDuration(dur)}</td>
                   <td className="ops-mono">
                     {j.exit_code == null

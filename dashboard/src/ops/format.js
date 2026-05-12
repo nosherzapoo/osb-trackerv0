@@ -63,6 +63,14 @@ export function fmtDuration(sec) {
   return s ? `${m}m${s}s` : `${m}m`;
 }
 
+export function triggerStyle(triggered_by) {
+  if (!triggered_by) return { label: '—', cls: 'flag-mute' };
+  if (triggered_by.startsWith('manual:')) return { label: triggered_by, cls: 'flag-med' };
+  if (triggered_by.startsWith('probe:'))  return { label: triggered_by, cls: 'flag-ok' };
+  if (triggered_by === 'systemd')         return { label: 'systemd', cls: 'flag-mute' };
+  return { label: triggered_by, cls: 'flag-mute' };
+}
+
 export function fmtUtc(iso, withSeconds = false) {
   if (!iso) return '—';
   const d = new Date(iso);
