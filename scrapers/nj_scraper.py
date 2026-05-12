@@ -134,21 +134,50 @@ class NJScraper(BaseStateScraper):
         super().__init__("NJ")
 
     def run(self, backfill: bool = False) -> pd.DataFrame:
-        """Run tax return scraper, then merge handle from press releases."""
+        """Run tax return scraper, then merge handle from press releases.
+
+        Handle press releases publish on a different cadence than the tax
+        returns — March press release lands while April tax return is still
+        unpublished. So the merger must run even when the tax return scrape
+        produced no new rows; otherwise newly-published press releases
+        never reach the CSV.
+        """
         combined = super().run(backfill=backfill)
-        if combined.empty:
-            return combined
 
-        # Merge handle data from press release scraper
-        combined = self._merge_handle_data(combined)
-
-        # Re-save with handle populated
         processed_dir = Path("data/processed")
         output_path = processed_dir / f"{self.state_code}.csv"
+
+        # When base scrape returned no new tax-return rows, fall back to the
+        # existing on-disk CSV so the press-release merger has something to
+        # enrich. Skip entirely if there's no CSV either (first run + tax
+        # return failure — nothing to merge into).
+        if combined.empty:
+            if not output_path.exists():
+                self.logger.warning(
+                    "NJ: tax-return scrape produced no rows and no existing "
+                    "NJ.csv — skipping handle merge"
+                )
+                return combined
+            try:
+                combined = pd.read_csv(output_path, low_memory=False)
+                self.logger.info(
+                    f"NJ: tax-return scrape returned no new rows; merging "
+                    f"press-release handle into existing CSV ({len(combined)} rows)"
+                )
+            except Exception as e:
+                self.logger.warning(f"NJ: could not load existing CSV for merge: {e}")
+                return pd.DataFrame()
+
+        # Track the row count before merge so we can detect whether the merger
+        # actually added anything (avoid pointless writes).
+        prior_count = len(combined)
+        combined = self._merge_handle_data(combined)
         combined.to_csv(output_path, index=False)
         handle_count = combined['handle'].notna().sum()
-        self.logger.info(f"Handle merged: {handle_count}/{len(combined)} rows now have handle")
-
+        self.logger.info(
+            f"Handle merged: {handle_count}/{len(combined)} rows now have handle "
+            f"(was {prior_count} pre-merge)"
+        )
         return combined
 
     def _merge_handle_data(self, df: pd.DataFrame) -> pd.DataFrame:
