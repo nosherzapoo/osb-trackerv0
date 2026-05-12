@@ -91,18 +91,30 @@ class NJHandleScraper(BaseStateScraper):
 
         combined = pd.concat(all_data, ignore_index=True)
 
-        # Deduplicate
+        # Merge with the existing on-disk CSV so we don't clobber historical
+        # periods that aren't in the current run's all_data set. Without this
+        # merge a non-backfill run (which only scrapes new periods) would
+        # overwrite NJ_handle.csv with just the new periods and lose 6 years
+        # of history.
+        processed_dir = Path("data/processed")
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        output_path = processed_dir / self.OUTPUT_FILENAME
+        if output_path.exists():
+            try:
+                existing = pd.read_csv(output_path, low_memory=False)
+                combined = pd.concat([existing, combined], ignore_index=True)
+            except Exception as e:
+                self.logger.warning(f"Could not merge with existing {output_path}: {e}")
+
+        # Deduplicate — keep='last' wins so a re-scrape of a published period
+        # supersedes the prior row (e.g., when the regulator revises figures).
         key_cols = ["state_code", "period_end", "channel", "sport_category", "period_type"]
         existing_cols = [c for c in key_cols if c in combined.columns]
         dupes = combined.duplicated(subset=existing_cols, keep=False)
         if dupes.any():
-            self.logger.warning(f"Found {dupes.sum()} duplicate rows — keeping last")
+            self.logger.info(f"Deduping {dupes.sum()} duplicate rows — keeping latest")
             combined.drop_duplicates(subset=existing_cols, keep="last", inplace=True)
 
-        # Save to NJ_handle.csv (NOT NJ.csv)
-        processed_dir = Path("data/processed")
-        processed_dir.mkdir(parents=True, exist_ok=True)
-        output_path = processed_dir / self.OUTPUT_FILENAME
         combined.to_csv(output_path, index=False)
         self.logger.info(f"Saved {len(combined)} rows to {output_path}")
 
