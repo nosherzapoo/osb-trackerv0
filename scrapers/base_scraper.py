@@ -413,14 +413,18 @@ class BaseStateScraper(ABC):
 
         # Merge with existing history unless this is a full backfill rebuild.
         # _validate_full_dataset handles dedup (keep='last' preserves new rows).
+        # existing_row_count tracks the *total* prior CSV size including any
+        # aggregated_from_weekly rows — those will be regenerated and re-added
+        # below, so excluding them here would mis-attribute the regeneration as
+        # net-new rows and trigger spurious "new data" notifications.
         existing_row_count = 0
         if not backfill and output_path.exists():
             try:
                 existing = pd.read_csv(output_path, low_memory=False)
+                existing_row_count = len(existing)
                 # Drop prior monthly aggregations — they'll be regenerated below
                 if 'source_file' in existing.columns:
                     existing = existing[existing['source_file'] != 'aggregated_from_weekly']
-                existing_row_count = len(existing)
                 combined = pd.concat([existing, combined], ignore_index=True)
             except Exception as e:
                 self.logger.warning(f"Could not merge with existing CSV: {e}")
