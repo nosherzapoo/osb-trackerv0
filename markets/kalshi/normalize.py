@@ -83,8 +83,41 @@ _CATEGORY_PREFIXES = [
 ]
 
 
-def categorize(series_ticker: str | None, event_ticker: str | None) -> str:
-    """Best-effort category for a Kalshi market. Falls back to 'other'."""
+_EVENT_CATEGORY_NORMALIZE = {
+    # Kalshi /events 'category' strings -> our normalized buckets.
+    "Elections": "politics",
+    "Politics": "politics",
+    "Sports": "sports",
+    "Crypto": "crypto",
+    "Economics": "economics",
+    "Finance": "economics",
+    "Climate and Weather": "weather",
+    "Weather": "weather",
+    "Entertainment": "entertainment",
+    "Culture": "entertainment",
+    "Science and Technology": "other",
+    "Science": "other",
+    "World": "other",
+    "Health": "other",
+    "Other": "other",
+}
+
+
+def categorize(series_ticker: str | None,
+               event_ticker: str | None,
+               event_category: str | None = None) -> str:
+    """Best-effort category for a Kalshi market. Prefers Kalshi's own
+    event-level category string when present (most reliable), falls back to
+    series-ticker prefix matching.
+    """
+    if event_category:
+        norm = _EVENT_CATEGORY_NORMALIZE.get(event_category)
+        if norm:
+            return norm
+        # unknown category string — pass through lowercased so dashboards
+        # surface it without losing fidelity
+        return event_category.lower().split(" ")[0]
+
     candidates = [s for s in (series_ticker, event_ticker) if s]
     for c in candidates:
         up = c.upper()
@@ -94,57 +127,80 @@ def categorize(series_ticker: str | None, event_ticker: str | None) -> str:
     return "other"
 
 
-def normalize_market(m: dict) -> dict:
-    """Map a raw Kalshi market object to a row ready for pm.markets upsert."""
+def _pick(m: dict, *keys):
+    """Return the first non-None field value from m for the given keys.
+    Kalshi serves the same data under different field names depending on
+    whether the market is fetched from /markets (`volume_24h_fp`) or nested
+    under an event (`volume_24h`)."""
+    for k in keys:
+        if k in m and m[k] is not None and m[k] != "":
+            return m[k]
+    return None
+
+
+def normalize_market(m: dict, *, event_category: str | None = None,
+                      event_title: str | None = None) -> dict:
+    """Map a raw Kalshi market object to a row ready for pm.markets upsert.
+
+    `event_category` is passed in when the caller has access to the parent
+    event (e.g. when ingesting via /events?with_nested_markets=true) — it
+    overrides our series-prefix heuristic with Kalshi's own labeling.
+    """
     ticker = m.get("ticker") or ""
     event_ticker = m.get("event_ticker")
-    # Kalshi exposes the series via custom_strike / mve_collection_ticker / a
-    # convention where the ticker is `<SERIES>-<EVENT>-<MARKET>`. The simplest
-    # reliable extraction: take the first hyphen-segment of the event_ticker
-    # (drops the date suffix), falling back to the ticker prefix.
     series_ticker = None
     if event_ticker:
         series_ticker = event_ticker.split("-", 1)[0]
     elif ticker:
         series_ticker = ticker.split("-", 1)[0]
 
+    # When ingesting nested markets, prefer the parent event's title over the
+    # market's narrow "yes" sub-title — the event title is what users recognise.
+    title = (m.get("title") or "").strip()
+    if event_title and (not title or title.startswith("yes ") or title.startswith("no ")):
+        title = event_title
+
     return {
         "id": f"kalshi:{ticker}",
         "platform": "kalshi",
         "external_id": ticker,
-        "slug": ticker,                              # Kalshi tickers double as slugs
-        "title": (m.get("title") or "").strip() or ticker,
-        "category": categorize(series_ticker, event_ticker),
+        "slug": ticker,
+        "title": title or ticker,
+        "category": categorize(series_ticker, event_ticker, event_category),
         "series_ticker": series_ticker,
         "event_ticker": event_ticker,
         "status": m.get("status"),
-        "open_at": _ts(m.get("open_time")),
-        "close_at": _ts(m.get("close_time")),
-        "settled_at": _ts(m.get("expiration_time")) if m.get("status") in ("settled", "finalized") else None,
+        "open_at": _ts(_pick(m, "open_time")),
+        "close_at": _ts(_pick(m, "close_time")),
+        "settled_at": _ts(_pick(m, "expiration_time")) if m.get("status") in ("settled", "finalized") else None,
         "settled_outcome": (m.get("result") or "") or None,
         "metadata": {
             "subtitle": m.get("yes_sub_title") or m.get("no_sub_title"),
             "market_type": m.get("market_type"),
             "strike_type": m.get("strike_type"),
             "rules_primary": m.get("rules_primary"),
-            "notional_value_dollars": _f(m.get("notional_value_dollars")),
+            "notional_value_dollars": _f(_pick(m, "notional_value_dollars")),
             "fractional_trading_enabled": m.get("fractional_trading_enabled"),
+            "kalshi_event_category": event_category,
         },
     }
 
 
 def snapshot_row(market_id: str, m: dict, taken_at: datetime) -> dict:
-    """Build a pm.market_snapshots row from a raw Kalshi market object."""
+    """Build a pm.market_snapshots row from a raw Kalshi market object.
+
+    Accepts both /markets shape (volume_24h_fp etc) and /events nested shape
+    (volume_24h etc) by reading either field name."""
     return {
         "market_id": market_id,
         "taken_at": taken_at,
-        "yes_price": _f(m.get("last_price_dollars")),
-        "yes_bid":   _f(m.get("yes_bid_dollars")),
-        "yes_ask":   _f(m.get("yes_ask_dollars")),
-        "no_bid":    _f(m.get("no_bid_dollars")),
-        "no_ask":    _f(m.get("no_ask_dollars")),
-        "volume_total_usd": _f(m.get("volume_fp")),
-        "volume_24h_usd":   _f(m.get("volume_24h_fp")),
-        "liquidity_usd":    _f(m.get("liquidity_dollars")),
-        "open_interest":    _f(m.get("open_interest_fp")),
+        "yes_price":        _f(_pick(m, "last_price", "last_price_dollars")),
+        "yes_bid":          _f(_pick(m, "yes_bid",   "yes_bid_dollars")),
+        "yes_ask":          _f(_pick(m, "yes_ask",   "yes_ask_dollars")),
+        "no_bid":           _f(_pick(m, "no_bid",    "no_bid_dollars")),
+        "no_ask":           _f(_pick(m, "no_ask",    "no_ask_dollars")),
+        "volume_total_usd": _f(_pick(m, "volume",         "volume_fp")),
+        "volume_24h_usd":   _f(_pick(m, "volume_24h",     "volume_24h_fp")),
+        "liquidity_usd":    _f(_pick(m, "liquidity",      "liquidity_dollars")),
+        "open_interest":    _f(_pick(m, "open_interest",  "open_interest_fp")),
     }

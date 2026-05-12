@@ -25,8 +25,8 @@ BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 PG_PASS_FILE = Path("/root/.osb_pg_pass")
 
 DEFAULT_TOP_N = 200
-PAGE_LIMIT = 1000
-MAX_PAGES = 30                       # safety cap (≈30k markets)
+EVENTS_PAGE_LIMIT = 200              # /events caps at 200 per page
+MAX_EVENT_PAGES = 40                 # safety cap (≈8k events)
 REQUEST_TIMEOUT = 30                 # seconds
 RETRY_DELAYS = [1, 2, 4, 8]          # 4 retries with exponential backoff
 
@@ -61,18 +61,26 @@ def _get(url: str, params: dict | None = None) -> dict | None:
     return None
 
 
-def iter_markets(status: str = "open") -> Iterator[dict]:
-    """Yield every Kalshi market with the given status, paginating cursors."""
+def iter_events_with_markets(status: str = "open") -> Iterator[tuple[dict, dict]]:
+    """Yield (event, market) pairs for every Kalshi event with the given
+    status, paginating cursors. Using /events?with_nested_markets=true gives
+    us the real-volume populated markets *and* the event-level category in
+    one pass — the bare /markets endpoint dumps ~30k dormant multivariate
+    parlays first which drowns out the rest."""
     cursor = None
-    for _ in range(MAX_PAGES):
-        params = {"status": status, "limit": PAGE_LIMIT}
+    for _ in range(MAX_EVENT_PAGES):
+        params = {"status": status, "limit": EVENTS_PAGE_LIMIT,
+                  "with_nested_markets": "true"}
         if cursor:
             params["cursor"] = cursor
-        data = _get(f"{BASE_URL}/markets", params=params)
-        if not data or "markets" not in data:
+        data = _get(f"{BASE_URL}/events", params=params)
+        if not data or "events" not in data:
             return
-        for m in data["markets"]:
-            yield m
+        for ev in data["events"]:
+            for m in ev.get("markets") or []:
+                # The event's category is more reliable than ticker-prefix
+                # heuristics — pass it down to the normalizer.
+                yield ev, m
         cursor = data.get("cursor")
         if not cursor:
             return
@@ -83,26 +91,37 @@ def run(top_n: int = DEFAULT_TOP_N, status: str = "open") -> dict:
     started = time.time()
     taken_at = datetime.now(timezone.utc)
 
-    # 1) Pull every active market into memory. Top-N is decided client-side
-    #    because Kalshi /markets has no order-by parameter.
-    raw_markets = list(iter_markets(status=status))
-    if not raw_markets:
-        print("kalshi: no markets returned", flush=True)
+    # 1) Pull every active event + its nested markets in one pass. Skips
+    #    the bare /markets endpoint, which is dominated by dormant
+    #    multivariate parlays.
+    pairs = list(iter_events_with_markets(status=status))
+    if not pairs:
+        print("kalshi: no events returned", flush=True)
         return {"markets_seen": 0, "snapshots": 0, "elapsed_sec": time.time() - started}
 
-    # 2) Sort by 24h volume (numeric, with safe fallback) and slice top N.
+    # 2) Sort by 24h volume (try both nested + flat field names) and slice top N.
     def _vol(m: dict) -> float:
-        try:
-            return float(m.get("volume_24h_fp") or 0)
-        except (TypeError, ValueError):
-            return 0.0
-    raw_markets.sort(key=_vol, reverse=True)
-    top_markets = raw_markets[:top_n]
+        for k in ("volume_24h", "volume_24h_fp"):
+            v = m.get(k)
+            if v is None or v == "":
+                continue
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+    pairs.sort(key=lambda eb: _vol(eb[1]), reverse=True)
+    top_pairs = pairs[:top_n]
 
-    # 3) Upsert pm.markets for *every* market seen (catalog stays current even
-    #    for the long tail), then insert snapshots for the top N only.
-    market_rows = [normalize_market(m) for m in raw_markets]
-    snapshot_rows = [snapshot_row(f"kalshi:{m['ticker']}", m, taken_at) for m in top_markets]
+    # 3) Upsert pm.markets for every (event, market) seen, snapshot top N.
+    market_rows = [
+        normalize_market(m, event_category=ev.get("category"), event_title=ev.get("title"))
+        for ev, m in pairs
+    ]
+    snapshot_rows = [
+        snapshot_row(f"kalshi:{m['ticker']}", m, taken_at)
+        for _ev, m in top_pairs
+    ]
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.executemany(
@@ -149,9 +168,11 @@ def run(top_n: int = DEFAULT_TOP_N, status: str = "open") -> dict:
         conn.commit()
 
     elapsed = time.time() - started
+    top_vol = _vol(top_pairs[0][1]) if top_pairs else 0.0
     print(
-        f"kalshi: seen={len(market_rows)} top={len(snapshot_rows)} "
-        f"elapsed={elapsed:.1f}s",
+        f"kalshi: events_seen={len({ev['event_ticker'] for ev, _ in pairs})} "
+        f"markets_seen={len(market_rows)} top={len(snapshot_rows)} "
+        f"top_24h_volume=${top_vol:,.0f} elapsed={elapsed:.1f}s",
         flush=True,
     )
     return {
