@@ -10,6 +10,7 @@ import LandingPage from './components/LandingPage';
 import ApiAccessPage from './components/ApiAccessPage';
 import OpsApp from './ops/OpsApp';
 import MarketsApp from './markets/MarketsApp';
+import BusinessApp from './markets/business/BusinessApp';
 import './styles.css';
 
 function StateRedirect() {
@@ -31,6 +32,7 @@ createRoot(document.getElementById('root')).render(
         <Route path="/operators" element={<OperatorRedirect />} />
         <Route path="/app/*" element={<App />} />
         <Route path="/ops/*" element={<OpsApp />} />
+        <Route path="/markets/business/*" element={<BusinessApp />} />
         <Route path="/markets/*" element={<MarketsApp />} />
       </Routes>
     </BrowserRouter>
