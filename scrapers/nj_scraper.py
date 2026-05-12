@@ -236,6 +236,14 @@ class NJScraper(BaseStateScraper):
             df['period_end'], format='mixed', errors='coerce'
         )
 
+        # Drop any TOTAL rows that previous merger passes appended (tagged with
+        # source_file='NJ_handle.csv'). Without this, every re-merge stacks a
+        # fresh TOTAL row on top of the previous ones and the new total_ggr
+        # double-counts the previously-injected TOTAL row's gross_revenue —
+        # so ggr doubles, triples, ... on each NJ scrape.
+        if 'source_file' in df.columns:
+            df = df[df['source_file'] != 'NJ_handle.csv'].copy()
+
         # Strip individual operator handle (don't distribute — we don't have per-op handle)
         df['handle'] = pd.NA
 
