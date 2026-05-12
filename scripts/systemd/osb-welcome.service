@@ -1,0 +1,11 @@
+[Unit]
+Description=OSB tracker — welcome emails + contact notifications
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/osb-trackerv0
+ExecStart=/srv/osb-trackerv0/scripts/systemd/run_welcome.sh
+TimeoutStartSec=5min
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,7 @@
+[Unit]
+Description=Run QA daily 04:00 UTC
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target

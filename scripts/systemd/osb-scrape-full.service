@@ -1,0 +1,13 @@
+[Unit]
+Description=OSB tracker — weekly full backfill of every state
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/osb-trackerv0
+ExecStart=/srv/osb-trackerv0/scripts/systemd/run_full.sh
+TimeoutStartSec=12h
+Nice=15
+StandardOutput=journal
+StandardError=journal

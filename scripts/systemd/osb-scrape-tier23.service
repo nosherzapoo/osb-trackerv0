@@ -1,0 +1,13 @@
+[Unit]
+Description=OSB tracker — scrape tier 2-3
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/osb-trackerv0
+ExecStart=/srv/osb-trackerv0/scripts/systemd/run_tier.sh 23
+TimeoutStartSec=45min
+Nice=10
+StandardOutput=journal
+StandardError=journal

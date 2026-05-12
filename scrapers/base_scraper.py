@@ -318,13 +318,25 @@ class BaseStateScraper(ABC):
             periods = self._filter_new_periods(periods)
             self.logger.info(f"{len(periods)} new periods to process")
 
+        # Helper for "no_new_data" sidecar that correctly reports existing rows
+        # (used in multiple early-return paths).
+        def _existing_csv_row_count() -> int:
+            existing_csv_path = Path(f"data/processed/{self.state_code}.csv")
+            if not existing_csv_path.exists():
+                return 0
+            try:
+                return sum(1 for _ in open(existing_csv_path)) - 1
+            except Exception:
+                return 0
+
         if not periods:
             self.logger.info("No periods to process")
+            existing_count = _existing_csv_row_count()
             write_sidecar(
                 self.state_code,
                 status="no_new_data",
                 started_at=run_started_iso,
-                rows_total=0,
+                rows_total=existing_count,
                 rows_new=0,
                 elapsed_sec=round(_time.time() - run_started, 2),
                 metadata={"reason": "no_new_periods", "backfill": backfill},
@@ -332,6 +344,7 @@ class BaseStateScraper(ABC):
             return pd.DataFrame(columns=STANDARD_COLUMNS)
 
         all_data = []
+        period_failures: list[dict] = []  # download/parse exceptions, by period
         for period in periods:
             try:
                 raw_file = self.download_report(period)
@@ -356,23 +369,45 @@ class BaseStateScraper(ABC):
                     self.logger.warning(f"  EMPTY: No data for {period['period_end']}")
             except Exception as e:
                 self.logger.error(f"  FAIL: {period['period_end']}: {e}", exc_info=True)
+                period_failures.append({
+                    "period_end": str(period.get("period_end", "?")),
+                    "error": str(e)[:300],
+                })
                 continue
 
         if not all_data:
-            # Distinguish two cases:
-            #   - No existing CSV on disk → genuine first-run failure (status=empty)
-            #   - Existing CSV present  → regulator just hasn't published the
-            #     periods we discovered yet (status=no_new_data); the existing
-            #     dataset is preserved untouched on disk.
-            existing_csv_path = Path(f"data/processed/{self.state_code}.csv")
-            existing_count = 0
-            if existing_csv_path.exists():
-                try:
-                    existing_count = sum(1 for _ in open(existing_csv_path)) - 1
-                except Exception:
-                    existing_count = 0
+            # Three cases to distinguish:
+            #   1. All periods raised exceptions (download blocked, parse broken)
+            #      → status=failed — surface this loudly
+            #   2. Existing CSV on disk + no exceptions → regulator hasn't
+            #      published the discovered periods yet (status=no_new_data)
+            #   3. No existing CSV + no exceptions → first-run failure
+            #      (status=empty)
+            existing_count = _existing_csv_row_count()
 
-            if existing_count > 0:
+            if period_failures:
+                self.logger.error(
+                    f"All {len(periods)} periods failed: "
+                    f"{len(period_failures)} download/parse errors"
+                )
+                last_err = period_failures[-1].get("error", "?")
+                write_sidecar(
+                    self.state_code,
+                    status="failed",
+                    started_at=run_started_iso,
+                    rows_total=existing_count,
+                    rows_new=0,
+                    elapsed_sec=round(_time.time() - run_started, 2),
+                    error_text=f"{len(period_failures)} of {len(periods)} periods "
+                               f"failed; last error: {last_err}",
+                    metadata={
+                        "periods_attempted": len(periods),
+                        "periods_failed": len(period_failures),
+                        "failures": period_failures[:10],
+                        "backfill": backfill,
+                    },
+                )
+            elif existing_count > 0:
                 self.logger.info(
                     f"Discovered {len(periods)} periods, none yielded rows — "
                     f"likely not yet published. Existing CSV preserved ({existing_count:,} rows)."

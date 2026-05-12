@@ -1,0 +1,11 @@
+[Unit]
+Description=Run osb-scrape-tier23 every 6h at :15
+After=network-online.target
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:15:00
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
