@@ -30,6 +30,7 @@ createRoot(document.getElementById('root')).render(
         <Route path="/operators" element={<OperatorRedirect />} />
         <Route path="/app/*" element={<App />} />
         <Route path="/ops/*" element={<OpsApp />} />
+        <Route path="/markets/*" element={<MarketsApp />} />
       </Routes>
     </BrowserRouter>
     <Analytics />

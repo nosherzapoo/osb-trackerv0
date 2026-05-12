@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily PM roll-up + snapshot retention — 04:10 UTC
+
+[Timer]
+OnCalendar=*-*-* 04:10:00
+RandomizedDelaySec=300
+Persistent=false
+Unit=osb-market-rollup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=OSB tracker — prediction markets ingest (Kalshi)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/srv/osb-trackerv0
+ExecStart=/srv/osb-trackerv0/.venv/bin/python /srv/osb-trackerv0/scripts/run_market_ingest.py kalshi
+TimeoutStartSec=10min
+StandardOutput=journal
+StandardError=journal

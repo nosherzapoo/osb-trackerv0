@@ -1,0 +1,12 @@
+[Unit]
+Description=OSB tracker — prediction markets daily roll-up + retention
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/srv/osb-trackerv0
+ExecStart=/srv/osb-trackerv0/.venv/bin/python /srv/osb-trackerv0/scripts/pm_daily_rollup.py
+TimeoutStartSec=15min
+StandardOutput=journal
+StandardError=journal
