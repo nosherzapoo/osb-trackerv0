@@ -27,6 +27,7 @@ from datetime import date, datetime
 
 import pandas as pd
 import pdfplumber
+import requests
 from bs4 import BeautifulSoup
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -42,10 +43,20 @@ AR_INDEX_URL = (
     "https://www.dfa.arkansas.gov/office/taxes/excise-tax-administration/"
     "miscellaneous-tax/arkansas-miscellaneous-tax-laws/casino-gaming-sports-wagering/"
 )
-USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+# As of May 2026 the regulator only publishes one cumulative file at a time
+# under a `_<latest_month>` suffix scheme (e.g. CasinoGamingFYE2026_April.pdf).
+# Prior FY files and the no-suffix `CasinoGamingFYE<year>.pdf` both 403 now.
+# Plain requests with a real-browser UA reach the file fine — Cloudflare only
+# blocks the listing page, not direct PDF GETs.
+AR_BASE_URL = "https://www.dfa.arkansas.gov/wp-content/uploads"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept-Encoding": "gzip, deflate",
+    "Accept": "application/pdf,*/*;q=0.8",
 }
 
 # AR FY ends June 30
@@ -65,66 +76,73 @@ class ARScraper(BaseStateScraper):
     def __init__(self):
         super().__init__("AR")
 
-    def discover_periods(self) -> list[dict]:
-        """Discover AR DFA cumulative FY PDF reports."""
-        periods = []
-        seen_urls = set()
-
-        # AR DFA is behind Cloudflare with aggressive bot detection —
-        # plain HTTP returns 403 even from residential IPs. patchright + real Chrome
-        # is required to reach the page.
-        try:
-            html = fetch_html_stealth(AR_INDEX_URL, use_patchright=True)
-            soup = BeautifulSoup(html, "html.parser")
-
-            for link in soup.find_all("a", href=True):
-                href = link["href"]
-                if ".pdf" not in href.lower():
-                    continue
-                if "casino" not in href.lower() and "gaming" not in href.lower():
-                    continue
-
-                full_url = href if href.startswith("http") else f"https://www.dfa.arkansas.gov{href}"
-                if full_url in seen_urls:
-                    continue
-                seen_urls.add(full_url)
-
-                # Extract FY year from filename
-                fy_match = re.search(r'FYE(\d{4})', href)
-                if fy_match:
-                    fy = int(fy_match.group(1))
-                    periods.append({
-                        "download_url": full_url,
-                        "fy": fy,
-                        "period_end": date(fy, 6, 30),
-                        "period_type": "monthly",
-                    })
-        except Exception as e:
-            self.logger.warning(f"  Could not scrape AR index: {e}")
-
-        # Also try known URL patterns
+    @staticmethod
+    def _current_fy() -> int:
+        """AR fiscal year ends June 30. FY2026 runs Jul 2025 - Jun 2026."""
         today = date.today()
-        current_fy = today.year if today.month >= 7 else today.year
-        for fy in range(AR_START_FY, current_fy + 2):
-            # Latest FY file (no month suffix)
-            url = f"https://www.dfa.arkansas.gov/wp-content/uploads/CasinoGamingFYE{fy}.pdf"
-            if url not in seen_urls:
-                seen_urls.add(url)
-                periods.append({
-                    "download_url": url,
-                    "fy": fy,
-                    "period_end": date(fy, 6, 30),
-                    "period_type": "monthly",
-                })
+        return today.year + 1 if today.month >= 7 else today.year
+
+    def _find_latest_monthly_url(self, fy: int) -> str | None:
+        """HEAD-probe FYE<fy>_<month>.pdf from latest month back to July, return
+        the first one that exists. Some regulators only keep the freshest file."""
+        # Probing order: start with current calendar month, walk back through the FY.
+        today = date.today()
+        if today.month >= 7:
+            # We're in the second half of FY (Jul-Dec)
+            months_in_order = [
+                (today.month, today.year),
+            ]
+            for m in range(today.month - 1, 6, -1):
+                months_in_order.append((m, today.year))
+        else:
+            # First half of FY (Jan-Jun)
+            months_in_order = [(today.month, today.year)]
+            for m in range(today.month - 1, 0, -1):
+                months_in_order.append((m, today.year))
+            for m in range(12, 6, -1):
+                months_in_order.append((m, today.year - 1))
+
+        for month_num, year in months_in_order:
+            month_name = calendar.month_name[month_num]
+            url = f"{AR_BASE_URL}/CasinoGamingFYE{fy}_{month_name}.pdf"
+            try:
+                resp = requests.head(url, headers=HEADERS, timeout=15, allow_redirects=True)
+                if resp.status_code == 200:
+                    self.logger.info(f"  Found AR FY{fy} latest: {month_name} ({year})")
+                    return url
+            except Exception as e:
+                self.logger.debug(f"  probe {url}: {e}")
+                continue
+        return None
+
+    def discover_periods(self) -> list[dict]:
+        """Discover AR DFA cumulative FY PDF reports.
+
+        As of May 2026 the regulator only publishes the current FY's PDF, under
+        a `_<latest_month>` filename suffix that rotates each month. Prior FY
+        files no longer download — historical AR data lives only in our CSV.
+        """
+        periods = []
+        current_fy = self._current_fy()
+
+        url = self._find_latest_monthly_url(current_fy)
+        if url:
+            periods.append({
+                "download_url": url,
+                "fy": current_fy,
+                "period_end": date(current_fy, 6, 30),
+                "period_type": "monthly",
+            })
+        else:
+            self.logger.warning(f"  No FY{current_fy} PDF found by month-suffix probe")
 
         self.logger.info(f"  Discovered {len(periods)} AR periods")
         return periods
 
     def download_report(self, period_info: dict) -> Path:
-        """Download AR DFA cumulative FY PDF."""
+        """Download AR DFA cumulative FY PDF via plain requests."""
         url = period_info["download_url"]
         fy = period_info["fy"]
-        # Use URL filename as part of cache key
         url_name = url.split("/")[-1].replace("%20", "_")
         filename = f"AR_FY{fy}_{url_name}"
         save_path = self.raw_dir / filename
@@ -133,7 +151,13 @@ class ARScraper(BaseStateScraper):
             return save_path
 
         try:
-            download_file_stealth(url, save_path, use_patchright=True, warmup_url=AR_INDEX_URL)
+            resp = requests.get(url, headers=HEADERS, timeout=60, allow_redirects=True)
+            if resp.status_code != 200:
+                raise FileNotFoundError(
+                    f"AR PDF not found: {url} (status {resp.status_code})"
+                )
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            save_path.write_bytes(resp.content)
         except Exception as e:
             raise FileNotFoundError(f"AR PDF not found: {url} ({e})")
 
