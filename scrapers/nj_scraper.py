@@ -158,17 +158,25 @@ class NJScraper(BaseStateScraper):
         but NOT per-operator. Instead of distributing proportionally (which would
         be synthetic), we add TOTAL rows with the aggregate handle so consumers
         can see the state-level handle without attributing it to individual operators.
+
+        Always re-runs the handle sub-scraper (not just on cold-start) so newly
+        published press releases get merged. The sub-scraper itself filters to
+        new periods only, so this is cheap when nothing has dropped.
         """
         handle_csv = Path("data/processed/NJ_handle.csv")
 
-        if not handle_csv.exists():
-            try:
-                from scrapers.nj_handle_scraper import NJHandleScraper
-                self.logger.info("NJ_handle.csv not found — running handle scraper")
-                handle_scraper = NJHandleScraper()
-                handle_scraper.run(backfill=True)
-            except Exception as e:
-                self.logger.warning(f"Could not run handle scraper: {e}")
+        try:
+            from scrapers.nj_handle_scraper import NJHandleScraper
+            backfill_needed = not handle_csv.exists()
+            if backfill_needed:
+                self.logger.info("NJ_handle.csv not found — running handle scraper (backfill)")
+            else:
+                self.logger.info("Refreshing NJ_handle.csv with any newly-published press releases")
+            handle_scraper = NJHandleScraper()
+            handle_scraper.run(backfill=backfill_needed)
+        except Exception as e:
+            self.logger.warning(f"Could not run handle scraper: {e}")
+            if not handle_csv.exists():
                 return df
 
         if not handle_csv.exists():
