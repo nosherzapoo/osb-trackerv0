@@ -30,9 +30,11 @@ RI_FINANCIALS_URL = "https://www.rilot.com/en-us/about-us/financials.html"
 RI_PDF_BASE = "https://www.rilot.com"
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 
-# Known PDF paths (relative to rilot.com)
+# Known PDF paths for prior fiscal years (relative to rilot.com).
+# Current FY is discovered dynamically by month-suffix probe — see
+# _find_current_fy_pdf — because RI rotates filenames monthly
+# (Feb_*.pdf → Mar_*.pdf → Apr_*.pdf as new data drops).
 RI_KNOWN_PDFS = {
-    2026: "/content/dam/interactive/ilottery/pdfs/financial/Feb_SportsbookWebsiteData.pdf",
     2025: "/content/dam/interactive/ilottery/pdfs/financial/SportsbookWebsiteDataJun.pdf",
     2024: "/content/dam/interactive/ilottery/pdfs/financial/SportsbookWebsiteData06.2024.pdf",
     2023: "/content/dam/interactive/ilottery/pdfs/financial/SportsBookSummaryFY2023.pdf",
@@ -42,27 +44,70 @@ RI_KNOWN_PDFS = {
     2019: "/content/dam/interactive/ilottery/pdfs/financial/SportsBookSummaryFY2019.pdf",
 }
 
+# RI FY ends June 30 (Jul → Jun cycle).
+# Month abbreviations used in PDF filenames: "Mar_SportsbookWebsiteData.pdf".
 MONTH_ABBREVS = {
     "jul": 7, "aug": 8, "sep": 9, "oct": 10,
     "nov": 11, "dec": 12, "jan": 1, "feb": 2,
     "mar": 3, "apr": 4, "may": 5, "jun": 6,
 }
+_MONTH_TO_ABBREV = {v: k.capitalize() for k, v in MONTH_ABBREVS.items()}
 
 
 class RIScraper(BaseStateScraper):
     def __init__(self):
         super().__init__("RI")
 
+    @staticmethod
+    def _current_fy() -> int:
+        """RI FY ends June 30. FY2026 = Jul 2025 – Jun 2026."""
+        today = date.today()
+        return today.year + 1 if today.month >= 7 else today.year
+
+    def _find_current_fy_pdf(self) -> str | None:
+        """HEAD-probe Mon_SportsbookWebsiteData.pdf walking back from current
+        month to July, return the first 200. Skips 302 redirects (RI uses
+        them to mask missing files)."""
+        today = date.today()
+        if today.month >= 7:
+            month_order = [(m, today.year) for m in range(today.month, 6, -1)]
+        else:
+            month_order = [(m, today.year) for m in range(today.month, 0, -1)]
+            month_order += [(m, today.year - 1) for m in range(12, 6, -1)]
+
+        for month_num, _year in month_order:
+            abbrev = _MONTH_TO_ABBREV[month_num]
+            path = f"/content/dam/interactive/ilottery/pdfs/financial/{abbrev}_SportsbookWebsiteData.pdf"
+            url = RI_PDF_BASE + path
+            try:
+                resp = requests.head(url, headers={"User-Agent": USER_AGENT},
+                                     timeout=15, allow_redirects=False)
+                if resp.status_code == 200:
+                    self.logger.info(f"  Found RI FY{self._current_fy()} latest: {abbrev}")
+                    return url
+            except Exception:
+                continue
+        return None
+
     def discover_periods(self) -> list[dict]:
         """
-        Discover Sports Book Revenue PDFs from the RI Lottery website.
-        Tries to scrape the financials page for sportsbook PDF links,
-        then falls back to known URLs.
+        Discover Sports Book Revenue PDFs. Strategy:
+          - Probe Mon_SportsbookWebsiteData.pdf for current FY (latest month).
+          - Use hardcoded RI_KNOWN_PDFS for prior FYs.
+          - Also scrape the financials page in case new historical links appear,
+            but live page wins over hardcoded for ANY FY (regulator is the
+            source of truth when it lists something).
         """
-        periods = []
-        discovered_pdfs = dict(RI_KNOWN_PDFS)
+        # Start with hardcoded historical PDFs.
+        discovered_pdfs: dict[int, str] = dict(RI_KNOWN_PDFS)
 
-        # Try to scrape the financials page for additional PDF links
+        # Replace / set current-FY entry with the freshest month probe.
+        current_fy = self._current_fy()
+        current_url = self._find_current_fy_pdf()
+        if current_url:
+            discovered_pdfs[current_fy] = current_url
+
+        # Scrape financials page — let it override anything (live > hardcoded).
         try:
             resp = requests.get(RI_FINANCIALS_URL, headers={
                 "User-Agent": USER_AGENT,
@@ -74,25 +119,23 @@ class RIScraper(BaseStateScraper):
             for link in soup.find_all("a", href=True):
                 href = link["href"]
                 text = link.get_text(strip=True).lower()
-
                 if ".pdf" not in href.lower():
                     continue
                 if "sports" not in href.lower() and "sportsbook" not in href.lower():
                     continue
-
-                # Try to extract FY from the URL or link text
                 fy = self._extract_fy_from_url(href, text)
-                if fy and fy not in discovered_pdfs:
-                    discovered_pdfs[fy] = href
-
+                if fy:
+                    # Live page wins: it's the regulator's current view.
+                    full_url = href if href.startswith("http") else RI_PDF_BASE + href
+                    discovered_pdfs[fy] = full_url
         except Exception as e:
             self.logger.warning(f"  Could not scrape RI financials page: {e}")
 
         # Build period list
+        periods = []
         for fy in sorted(discovered_pdfs.keys()):
             pdf_path = discovered_pdfs[fy]
             full_url = pdf_path if pdf_path.startswith("http") else RI_PDF_BASE + pdf_path
-
             periods.append({
                 "download_url": full_url,
                 "period_end": date(fy, 6, 30),
