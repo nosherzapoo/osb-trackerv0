@@ -50,6 +50,53 @@ class MIScraper(BaseStateScraper):
     def __init__(self):
         super().__init__("MI")
 
+    def run(self, backfill: bool = False) -> pd.DataFrame:
+        """Run base scrape then drop retail-only periods.
+
+        MGCB publishes the Detroit retail sportsbook XLSX a week or two
+        ahead of the Internet Sports Betting XLSX. Retail is ~2% of MI's
+        total monthly handle (~$8M vs ~$400M online), so a period with
+        only retail rows would show the state's monthly handle as 50x
+        too low. Wait until both channels are published before exposing
+        a month to consumers — the next scrape after MGCB publishes
+        online will merge cleanly.
+        """
+        combined = super().run(backfill=backfill)
+        if combined.empty:
+            return combined
+        if "channel" not in combined.columns or "period_end" not in combined.columns:
+            return combined
+
+        # For every period that has retail rows, require at least one online
+        # row before we keep it. Drop the retail-only orphans.
+        retail_periods = set(
+            combined.loc[combined["channel"] == "retail", "period_end"].astype(str)
+        )
+        online_periods = set(
+            combined.loc[combined["channel"] == "online", "period_end"].astype(str)
+        )
+        retail_only = retail_periods - online_periods
+        if retail_only:
+            n_before = len(combined)
+            mask = ~(
+                (combined["channel"] == "retail")
+                & (combined["period_end"].astype(str).isin(retail_only))
+            )
+            combined = combined.loc[mask].copy()
+            n_after = len(combined)
+            self.logger.info(
+                f"MI: dropped {n_before - n_after} retail-only rows for periods "
+                f"awaiting online publication: {sorted(retail_only)}"
+            )
+
+            # Persist the filter (base_scraper already saved combined to CSV;
+            # we have to overwrite with the trimmed copy).
+            from pathlib import Path as _P
+            output_path = _P(f"data/processed/{self.state_code}.csv")
+            combined.to_csv(output_path, index=False)
+
+        return combined
+
     def discover_periods(self) -> list[dict]:
         """Discover Internet Sports Betting + Retail XLSX/XLS URLs from MGCB page."""
         periods = []
