@@ -585,7 +585,11 @@ class IAScraper(BaseStateScraper):
             "SBOpco": "SBOpco, LLC",
             "SCE": "SCE Partners, LLC",
             "Score": "Score Digital Sports Ventures Inc.",
-            "Sports": "Sports Information Group, LLC",
+            # "Sports Information" must come BEFORE "Sporttrade" matching and
+            # use the two-word prefix so it doesn't false-positive inside
+            # "Circa Sports Iowa" or "Penn Sports Interactive" — that bug
+            # was wiping Crown IA Gaming's (DraftKings) ~$80M monthly handle.
+            "Sports Information": "Sports Information Group, LLC",
             "Sporttrade": "Sporttrade Iowa LLC",
             "Tipico": "Tipico Iowa, LLC",
         }
