@@ -405,6 +405,9 @@ export default function OperatorComparison() {
                   <ExportButton data={tableData} filename="operator_comparison" />
                 </div>
               </div>
+              <div style={{ padding: '0 var(--space-4) var(--space-2)', fontSize: 11, color: 'var(--text-tertiary)', fontFamily: 'var(--font-body)' }}>
+                YoY uses the same operator-state set as the selected month — states without current data are excluded from the YoY base; new states are kept in current.
+              </div>
               <div className="data-table-wrapper">
                 <table className="data-table">
                   <thead>

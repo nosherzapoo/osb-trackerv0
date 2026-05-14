@@ -529,9 +529,15 @@ export async function getOperatorSummaryLatest(selectedStates = null, channel = 
     opMap[op].states.add(row.state_code);
   }
 
+  // For comparable YoY/MoM: only sum prior-period rows for (operator, state)
+  // pairs that ALSO reported in the current target period. This prevents
+  // states that haven't published current data yet from inflating the base
+  // and producing an artificial drop. New states (in current but not prior)
+  // stay in current — the market growing is a legitimate YoY effect.
   const prevMap = {};
   for (const row of prevRows) {
     const op = row.operator_standard;
+    if (!opMap[op]?.states.has(row.state_code)) continue;
     if (!prevMap[op]) prevMap[op] = { handle: 0, ggr: 0 };
     prevMap[op].handle += row.handle || 0;
     prevMap[op].ggr += row.standard_ggr ?? row.gross_revenue ?? 0;
@@ -540,6 +546,7 @@ export async function getOperatorSummaryLatest(selectedStates = null, channel = 
   const yoyMap = {};
   for (const row of yoyRows) {
     const op = row.operator_standard;
+    if (!opMap[op]?.states.has(row.state_code)) continue;
     if (!yoyMap[op]) yoyMap[op] = { handle: 0, ggr: 0 };
     yoyMap[op].handle += row.handle || 0;
     yoyMap[op].ggr += row.standard_ggr ?? row.gross_revenue ?? 0;
