@@ -84,8 +84,9 @@ class MIScraper(BaseStateScraper):
             )
             combined = combined.loc[mask].copy()
             n_after = len(combined)
+            dropped = n_before - n_after
             self.logger.info(
-                f"MI: dropped {n_before - n_after} retail-only rows for periods "
+                f"MI: dropped {dropped} retail-only rows for periods "
                 f"awaiting online publication: {sorted(retail_only)}"
             )
 
@@ -95,7 +96,64 @@ class MIScraper(BaseStateScraper):
             output_path = _P(f"data/processed/{self.state_code}.csv")
             combined.to_csv(output_path, index=False)
 
+            # Rewrite the sidecar so rows_new reflects post-drop reality.
+            # Without this, base_scraper's sidecar reports the retail-only rows
+            # as "new" every run → notifier sends a duplicate email every 6h.
+            self._adjust_sidecar_for_drop(combined, dropped, sorted(retail_only))
+
         return combined
+
+    def _adjust_sidecar_for_drop(self, combined: pd.DataFrame, dropped: int,
+                                  retail_only_periods: list[str]) -> None:
+        """Subtract dropped retail rows from sidecar's rows_new and refresh rows_total.
+
+        If the only "new" rows were retail-only orphans we just discarded, the
+        notifier should treat this run as no_new_data so no email goes out.
+        """
+        import json as _json
+        from pathlib import Path as _P
+        sidecar_path = _P("data/run_state/MI.json")
+        if not sidecar_path.exists():
+            return
+        try:
+            with open(sidecar_path) as f:
+                sc = _json.load(f)
+        except Exception as e:
+            self.logger.warning(f"MI: could not read sidecar to adjust rows_new: {e}")
+            return
+
+        prior_new = sc.get("rows_new") or 0
+        adjusted_new = max(0, prior_new - dropped)
+
+        # Recompute period_latest excluding the dropped retail-only periods
+        # (their period_end could otherwise still appear as latest if any
+        # online row exists for them — but if it did, they wouldn't be in
+        # retail_only_periods, so this is safe).
+        new_latest = sc.get("period_latest")
+        try:
+            real = combined
+            if 'source_file' in real.columns:
+                real = real[real['source_file'] != 'aggregated_from_weekly']
+            if not real.empty and 'period_end' in real.columns:
+                new_latest = str(real['period_end'].max())
+        except Exception:
+            pass
+
+        sc["rows_total"] = len(combined)
+        sc["rows_new"] = adjusted_new
+        sc["period_latest"] = new_latest
+        sc["status"] = "ok" if adjusted_new > 0 else "no_new_data"
+        meta = sc.get("metadata") or {}
+        meta["mi_retail_only_dropped"] = {
+            "count": dropped,
+            "periods": retail_only_periods,
+        }
+        sc["metadata"] = meta
+        try:
+            with open(sidecar_path, "w") as f:
+                _json.dump(sc, f, indent=2, default=str)
+        except Exception as e:
+            self.logger.warning(f"MI: could not rewrite sidecar: {e}")
 
     def discover_periods(self) -> list[dict]:
         """Discover Internet Sports Betting + Retail XLSX/XLS URLs from MGCB page."""
