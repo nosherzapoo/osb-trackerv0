@@ -458,7 +458,7 @@ export async function getOperatorSummaryRange(selectedStates = null, channel = n
   return { operators, startPeriod: periods[0], endPeriod: periods[periods.length - 1] };
 }
 
-export async function getOperatorSummaryLatest(selectedStates = null, channel = null) {
+export async function getOperatorSummaryLatest(selectedStates = null, channel = null, selectedPeriod = null) {
   let data = filterByChannel(await loadAllData(), channel);
   const monthly = data.filter(r =>
     r.period_type === 'monthly' &&
@@ -468,24 +468,29 @@ export async function getOperatorSummaryLatest(selectedStates = null, channel = 
     (!selectedStates || selectedStates.includes(r.state_code))
   );
 
-  // Find the most recent period across all filtered states
+  // Available periods (descending — newest first) for the UI picker.
   const periods = [...new Set(monthly.map(r => r.period_end))].sort();
-  const latestPeriod = periods[periods.length - 1];
-  if (!latestPeriod) return { operators: [], period: null };
+  if (periods.length === 0) return { operators: [], period: null, periods: [] };
 
-  // Prior period for MoM
-  const prevPeriod = periods.length >= 2 ? periods[periods.length - 2] : null;
+  // Use the caller-selected period when present and valid; otherwise default to latest.
+  const targetPeriod = (selectedPeriod && periods.includes(selectedPeriod))
+    ? selectedPeriod
+    : periods[periods.length - 1];
 
-  // YoY period (same month, prior year)
+  // Prior period for MoM = the period immediately before the target in the sorted list
+  const idx = periods.indexOf(targetPeriod);
+  const prevPeriod = idx > 0 ? periods[idx - 1] : null;
+
+  // YoY period (same month, prior year, relative to the target)
   let yoyPeriod = null;
-  if (latestPeriod) {
-    const d = new Date(latestPeriod + 'T00:00:00');
+  {
+    const d = new Date(targetPeriod + 'T00:00:00');
     const yoyMonth = `${d.getFullYear() - 1}-${String(d.getMonth() + 1).padStart(2, '0')}`;
     const yoyMatch = periods.filter(p => p.startsWith(yoyMonth));
     if (yoyMatch.length) yoyPeriod = yoyMatch[yoyMatch.length - 1];
   }
 
-  const latestRows = monthly.filter(r => r.period_end === latestPeriod);
+  const latestRows = monthly.filter(r => r.period_end === targetPeriod);
   const prevRows = prevPeriod ? monthly.filter(r => r.period_end === prevPeriod) : [];
   const yoyRows = yoyPeriod ? monthly.filter(r => r.period_end === yoyPeriod) : [];
 
@@ -558,7 +563,8 @@ export async function getOperatorSummaryLatest(selectedStates = null, channel = 
     }))
     .sort((a, b) => b.ggr - a.ggr);
 
-  return { operators, period: latestPeriod };
+  // Return periods in newest-first order for dropdown display
+  return { operators, period: targetPeriod, periods: [...periods].reverse() };
 }
 
 /**
@@ -639,7 +645,9 @@ export async function getOperatorDetail(operatorName, channel = null) {
       hold_pct: latest.handle > 0 ? latest.ggr / latest.handle : null,
       latest_period: periods[periods.length - 1],
       prev_handle: prev?.handle || null,
+      prev_ggr: prev?.ggr || null,
       yoy_handle: yoyData?.handle || null,
+      yoy_ggr: yoyData?.ggr || null,
       // Provenance
       period_end: periods[periods.length - 1],
       operator_standard: operatorName,

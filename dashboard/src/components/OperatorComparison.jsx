@@ -61,6 +61,44 @@ function filterByRange(data, rangeMonths) {
   return data.filter(d => d.period_end >= cutoffStr);
 }
 
+function formatPeriodLabel(period) {
+  if (!period) return '';
+  const d = new Date(period + 'T00:00:00');
+  if (Number.isNaN(d.getTime())) return period;
+  return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+}
+
+// YoY hold = current period hold - prior year same-month hold (percentage-point delta)
+function computeYoyHold(row) {
+  if (!row || row.handle == null || row.yoy_handle == null || !row.yoy_handle || !row.handle) return null;
+  const currentGgr = row.ggr ?? row.standard_ggr;
+  const priorGgr = row.yoy_ggr;
+  if (currentGgr == null || priorGgr == null) return null;
+  const currentHold = currentGgr / row.handle;
+  const priorHold = priorGgr / row.yoy_handle;
+  return currentHold - priorHold;
+}
+
+function renderYoy(change) {
+  if (!change) return '-';
+  return (
+    <span className={change.direction === 'up' ? 'cell-positive' : 'cell-negative'}>
+      {change.label}
+    </span>
+  );
+}
+
+function renderYoyHold(delta) {
+  if (delta == null || !Number.isFinite(delta)) return '-';
+  const positive = delta >= 0;
+  const pts = (delta * 100).toFixed(1);
+  return (
+    <span className={positive ? 'cell-positive' : 'cell-negative'}>
+      {positive ? '+' : ''}{pts}pp
+    </span>
+  );
+}
+
 export default function OperatorComparison() {
   const [selectedOps, setSelectedOps] = useState([]);
   const [channel, setChannel] = useState(null);
@@ -71,13 +109,15 @@ export default function OperatorComparison() {
   const [showOpPicker, setShowOpPicker] = useState(false);
   const [expandedOps, setExpandedOps] = useState({});
   const [opDetails, setOpDetails] = useState({});
+  const [selectedPeriod, setSelectedPeriod] = useState(null);
 
   const { data: allOperators } = useData(
     () => getAllOperatorNames(channel, selectedStates), [channel, selectedStates]
   );
   const { data: allStates } = useData(() => getStatesWithOperatorData(), []);
   const { data: latestData, loading: loadingLatest } = useData(
-    () => getOperatorSummaryLatest(selectedStates, channel), [selectedStates, channel]
+    () => getOperatorSummaryLatest(selectedStates, channel, selectedPeriod),
+    [selectedStates, channel, selectedPeriod]
   );
 
   // Pre-select top 5 on first load
@@ -345,8 +385,25 @@ export default function OperatorComparison() {
           {tableData.length > 0 && (
             <div className="card">
               <div className="card-header">
-                <div className="card-title">Operator Comparison - Latest Month</div>
-                <ExportButton data={tableData} filename="operator_comparison" />
+                <div className="card-title">
+                  Operator Comparison
+                  <span style={{ marginLeft: 8, color: 'var(--text-tertiary)', fontWeight: 400 }}>
+                    - {formatPeriodLabel(latestData?.period)}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                  <select
+                    className="btn"
+                    style={{ padding: '4px 8px', fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                    value={latestData?.period || ''}
+                    onChange={e => setSelectedPeriod(e.target.value || null)}
+                  >
+                    {(latestData?.periods || []).map(p => (
+                      <option key={p} value={p}>{formatPeriodLabel(p)}</option>
+                    ))}
+                  </select>
+                  <ExportButton data={tableData} filename="operator_comparison" />
+                </div>
               </div>
               <div className="data-table-wrapper">
                 <table className="data-table">
@@ -359,12 +416,16 @@ export default function OperatorComparison() {
                       <th>Hold %</th>
                       <th>Market Share</th>
                       <th>YoY Handle</th>
+                      <th>YoY GGR</th>
+                      <th>YoY Hold</th>
                       <th>States</th>
                     </tr>
                   </thead>
                   <tbody>
                     {tableData.map((op, i) => {
-                      const yoy = formatChange(op.handle, op.yoy_handle);
+                      const yoyHandle = formatChange(op.handle, op.yoy_handle);
+                      const yoyGgr = formatChange(op.ggr, op.yoy_ggr);
+                      const yoyHold = computeYoyHold(op);
                       const totalGgr = tableData.reduce((s, o) => s + o.ggr, 0);
                       const ggrShare = totalGgr > 0 ? op.ggr / totalGgr : 0;
                       const isExpanded = expandedOps[op.operator];
@@ -389,19 +450,17 @@ export default function OperatorComparison() {
                             <td><SourceableValue value={op.handle} formattedValue={formatCurrency(op.handle)} row={op} metric="Handle" /></td>
                             <td>{formatPct(op.hold_pct)}</td>
                             <td>{formatPct(ggrShare)}</td>
-                            <td>
-                              {yoy ? (
-                                <span className={yoy.direction === 'up' ? 'cell-positive' : 'cell-negative'}>
-                                  {yoy.label}
-                                </span>
-                              ) : '-'}
-                            </td>
+                            <td>{renderYoy(yoyHandle)}</td>
+                            <td>{renderYoy(yoyGgr)}</td>
+                            <td>{renderYoyHold(yoyHold)}</td>
                             <td style={{ color: 'var(--text-tertiary)', fontSize: 12, fontFamily: 'var(--font-mono)' }}>
                               {op.state_count}
                             </td>
                           </tr>
                           {isExpanded && stateRows.map(st => {
-                            const stYoy = formatChange(st.handle, st.yoy_handle);
+                            const stYoyHandle = formatChange(st.handle, st.yoy_handle);
+                            const stYoyGgr = formatChange(st.ggr, st.yoy_ggr);
+                            const stYoyHold = computeYoyHold(st);
                             return (
                               <tr key={op.operator + '-' + st.state_code} style={{ background: 'var(--bg-root)' }}>
                                 <td></td>
@@ -416,13 +475,9 @@ export default function OperatorComparison() {
                                 <td style={{ fontSize: 12 }}><SourceableValue value={st.handle} formattedValue={formatCurrency(st.handle)} row={st} metric="Handle" /></td>
                                 <td style={{ fontSize: 12 }}>{formatPct(st.hold_pct)}</td>
                                 <td></td>
-                                <td style={{ fontSize: 12 }}>
-                                  {stYoy ? (
-                                    <span className={stYoy.direction === 'up' ? 'cell-positive' : 'cell-negative'}>
-                                      {stYoy.label}
-                                    </span>
-                                  ) : '-'}
-                                </td>
+                                <td style={{ fontSize: 12 }}>{renderYoy(stYoyHandle)}</td>
+                                <td style={{ fontSize: 12 }}>{renderYoy(stYoyGgr)}</td>
+                                <td style={{ fontSize: 12 }}>{renderYoyHold(stYoyHold)}</td>
                                 <td></td>
                               </tr>
                             );
@@ -430,7 +485,7 @@ export default function OperatorComparison() {
                           {isExpanded && stateRows.length === 0 && (
                             <tr style={{ background: 'var(--bg-root)' }}>
                               <td></td>
-                              <td colSpan={7} style={{ textAlign: 'left', paddingLeft: 28, fontSize: 12, color: 'var(--text-tertiary)' }}>
+                              <td colSpan={9} style={{ textAlign: 'left', paddingLeft: 28, fontSize: 12, color: 'var(--text-tertiary)' }}>
                                 Loading state breakdown...
                               </td>
                             </tr>
