@@ -87,8 +87,11 @@ FAST_GAP_STATES = {
 # safety net.
 #
 # Current set:
-#   OR — AWS ELB 403 to all datacenter IPs (no working VPS-side fetch found)
-#   AZ — full-domain Cloudflare bot-wall challenge (cf-mitigated: challenge)
+#   OR — AWS ELB returns 403 at the IP layer, even via Playwright from the
+#        VPS. No JS challenge to solve, so a real Chromium provides no
+#        advantage. Would need a residential proxy.
+#   AZ — Cloudflare's JS challenge does not auto-clear from a datacenter IP
+#        within reasonable wait times. Also residential-proxy territory.
 #
 # Removed (now fixable):
 #   TN — fixed with full browser header set (Accept / Accept-Language / Sec-Fetch-*)
@@ -244,6 +247,10 @@ STATE_PROBE_CONFIGS: dict[str, dict] = {
         "signal": "xlsx_links",
         "headers": {"User-Agent": BROWSER_UA, "Accept-Encoding": "gzip, deflate, br"},
     },
+
+    # OR + AZ stay in PROBE_BLIND_STATES — Playwright tested but doesn't help
+    # because the blocks are datacenter-IP-level, not browser-fingerprint.
+    # See PROBE_BLIND_STATES comment above for details.
 }
 
 
@@ -332,8 +339,16 @@ class _RespLike:
         self.headers = headers
 
 
-def _do_request(method: str, url: str, headers: dict, client: str = "requests") -> _RespLike:
+def _do_request(method: str, url: str, headers: dict, client: str = "requests",
+                playwright_wait_ms: int = 4000) -> _RespLike:
+    # NOTE: We experimented with a client="playwright" branch to crack OR/AZ
+    # but datacenter-IP-level blocks (AWS ELB 403 for OR, Cloudflare challenge
+    # for AZ) don't yield to a real Chromium. Kept as dead arg in case a
+    # residential-proxy approach revives it; until then, "requests" / "httpx"
+    # are the only live clients.
+    del playwright_wait_ms  # unused but kept for forward compat
     method = method.upper()
+
     if client == "httpx":
         if httpx is None:
             raise RuntimeError("httpx is required for this probe but is not installed")
@@ -366,6 +381,7 @@ def probe_one(state: str, url: str) -> dict:
     signal = cfg.get("signal", "body")
     header_overrides = cfg.get("headers", {})
     client = cfg.get("client", "requests")
+    playwright_wait_ms = cfg.get("playwright_wait_ms", 4000)
     config_max_attempts = cfg.get("max_attempts")
     url_list = cfg.get("urls")
     if url_list:
@@ -412,7 +428,8 @@ def probe_one(state: str, url: str) -> dict:
         all_ok = True
         for u in urls:
             try:
-                resp = _do_request(method, u, headers, client=client)
+                resp = _do_request(method, u, headers, client=client,
+                                   playwright_wait_ms=playwright_wait_ms)
                 codes.append(resp.status_code)
                 hi, size = _signal_for_response(resp, signal)
                 hash_parts.append(f"{u}\n{resp.status_code}\n".encode("utf-8") + hi)
