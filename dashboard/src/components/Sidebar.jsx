@@ -1,4 +1,7 @@
-import { Globe, MapPin, Users, GitCompareArrows, BarChart3, Table2, BookOpen, Radio } from 'lucide-react';
+import { Globe, MapPin, Users, GitCompareArrows, BarChart3, Table2, BookOpen, Radio, LogIn, LogOut, Lock } from 'lucide-react';
+import { useState } from 'react';
+import { useAuth } from '../auth/AuthContext';
+import LoginModal from './LoginModal';
 
 const NAV_ITEMS = [
   { id: 'feed', label: 'Feed', icon: Radio },
@@ -12,6 +15,9 @@ const NAV_ITEMS = [
 ];
 
 export default function Sidebar({ activeView, onNavigate, dataAsOf }) {
+  const { user, isAuthenticated, logout } = useAuth();
+  const [showLogin, setShowLogin] = useState(false);
+
   return (
     <nav className="sidebar" role="navigation" aria-label="Main navigation">
       <div className="sidebar-logo">
@@ -34,11 +40,41 @@ export default function Sidebar({ activeView, onNavigate, dataAsOf }) {
           </button>
         ))}
       </div>
-      {dataAsOf && (
-        <div className="sidebar-footer">
+      <div className="sidebar-footer">
+        {isAuthenticated ? (
+          <div className="sidebar-account">
+            <div className="sidebar-account-row">
+              <div className="sidebar-account-status">
+                <span className="sidebar-account-dot" />
+                Live access
+              </div>
+              <button
+                className="sidebar-account-btn"
+                onClick={logout}
+                aria-label="Sign out"
+                title="Sign out"
+              >
+                <LogOut size={14} />
+              </button>
+            </div>
+            <div className="sidebar-account-name">{user?.name || user?.email}</div>
+          </div>
+        ) : (
+          <button
+            className="sidebar-login-btn"
+            onClick={() => setShowLogin(true)}
+            aria-label="Sign in for live data"
+          >
+            <Lock size={14} aria-hidden="true" />
+            <span>Sign in for live data</span>
+            <LogIn size={14} aria-hidden="true" style={{ marginLeft: 'auto' }} />
+          </button>
+        )}
+        {dataAsOf && (
           <div className="data-freshness">Data as of: {dataAsOf}</div>
-        </div>
-      )}
+        )}
+      </div>
+      <LoginModal open={showLogin} onClose={() => setShowLogin(false)} />
     </nav>
   );
 }

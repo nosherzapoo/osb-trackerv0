@@ -11,6 +11,7 @@ import ApiAccessPage from './components/ApiAccessPage';
 import OpsApp from './ops/OpsApp';
 import MarketsApp from './markets/MarketsApp';
 import BusinessApp from './markets/business/BusinessApp';
+import { AuthProvider } from './auth/AuthContext';
 import './styles.css';
 
 function StateRedirect() {
@@ -25,16 +26,18 @@ function OperatorRedirect() {
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<LandingPage />} />
-        <Route path="/api-access" element={<ApiAccessPage />} />
-        <Route path="/state/:code" element={<StateRedirect />} />
-        <Route path="/operators" element={<OperatorRedirect />} />
-        <Route path="/app/*" element={<App />} />
-        <Route path="/ops/*" element={<OpsApp />} />
-        <Route path="/markets/business/*" element={<BusinessApp />} />
-        <Route path="/markets/*" element={<MarketsApp />} />
-      </Routes>
+      <AuthProvider>
+        <Routes>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/api-access" element={<ApiAccessPage />} />
+          <Route path="/state/:code" element={<StateRedirect />} />
+          <Route path="/operators" element={<OperatorRedirect />} />
+          <Route path="/app/*" element={<App />} />
+          <Route path="/ops/*" element={<OpsApp />} />
+          <Route path="/markets/business/*" element={<BusinessApp />} />
+          <Route path="/markets/*" element={<MarketsApp />} />
+        </Routes>
+      </AuthProvider>
     </BrowserRouter>
     <Analytics />
   </StrictMode>

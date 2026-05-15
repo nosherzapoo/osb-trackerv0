@@ -1,6 +1,8 @@
 import Papa from 'papaparse';
 import { STATE_NAMES } from '../utils/colors';
 import { fetchAllFromSupabase } from './supabase';
+import { isAuthenticatedSync } from '../auth/AuthContext';
+import { PREVIEW_CUTOFF } from '../auth/clients';
 
 const STATE_CODES = [
   'AR','AZ','CO','CT','DC','DE','IA','IL','IN','KS','KY','LA',
@@ -10,6 +12,15 @@ const STATE_CODES = [
 
 let _allData = null;
 let _loading = null;
+
+// Apply the client-paywall date gate. Unauthenticated visitors see data
+// strictly up to PREVIEW_CUTOFF; logged-in clients see everything. The
+// AuthContext does a window.location.reload() on login/logout, so this
+// function returning a static slice per page-load is safe.
+function applyAuthGate(rows) {
+  if (isAuthenticatedSync()) return rows;
+  return rows.filter(r => !r.period_end || r.period_end <= PREVIEW_CUTOFF);
+}
 
 function parseCsvText(text) {
   const result = Papa.parse(text, {
@@ -68,8 +79,8 @@ function filterByChannel(data, channel) {
  * Cached after first load.
  */
 export async function loadAllData() {
-  if (_allData) return _allData;
-  if (_loading) return _loading;
+  if (_allData) return applyAuthGate(_allData);
+  if (_loading) return _loading.then(applyAuthGate);
 
   _loading = (async () => {
     let all = [];
@@ -95,7 +106,7 @@ export async function loadAllData() {
     return all;
   })();
 
-  return _loading;
+  return _loading.then(applyAuthGate);
 }
 
 /**

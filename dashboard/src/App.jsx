@@ -11,9 +11,19 @@ import DataTable from './components/DataTable';
 import DocsPage from './components/DocsPage';
 import FeedPage from './components/FeedPage';
 import EmailBanner from './components/EmailBanner';
+import PreviewBanner from './components/PreviewBanner';
+import { useAuth } from './auth/AuthContext';
+import { PREVIEW_CUTOFF } from './auth/clients';
+
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function formatDate(iso) {
+  const d = new Date(iso + 'T00:00:00');
+  return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+}
 
 export default function App() {
   const location = useLocation();
+  const { isAuthenticated } = useAuth();
   const [activeView, setActiveView] = useState('national');
   const [selectedState, setSelectedState] = useState('NY');
 
@@ -33,16 +43,17 @@ export default function App() {
   }, []);
 
   const dataAsOf = useMemo(() => {
+    if (!isAuthenticated) return formatDate(PREVIEW_CUTOFF);
     const d = new Date();
-    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    return `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
-  }, []);
+    return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+  }, [isAuthenticated]);
 
   return (
     <ErrorBoundary>
       <div className="app-layout">
         <Sidebar activeView={activeView} onNavigate={setActiveView} dataAsOf={dataAsOf} />
         <main className="main-content" role="main" aria-label="Dashboard content">
+          <PreviewBanner />
           <EmailBanner />
           <ErrorBoundary>
             {activeView === 'feed' && (
