@@ -3338,3 +3338,27 @@ select.ab-input {
   font-size: 11px;
 }
 .ab-freshness-hint .ab-link { font-size: 11.5px; }
+
+/* ─── API Builder column group (YoY section) ─────────── */
+.ab-col-group {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px dashed var(--border-subtle, #1a1a28);
+}
+.ab-col-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.ab-col-group-title {
+  font: 600 11.5px/1 var(--font-body);
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.ab-col-group-sub {
+  font: 400 11.5px/1.4 var(--font-body);
+  color: var(--text-tertiary);
+}

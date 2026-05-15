@@ -4,7 +4,8 @@ import { Copy, Play, ChevronDown, ChevronUp, Check, ExternalLink } from 'lucide-
 import { OPERATOR_COLORS, STATE_NAMES } from '../utils/colors';
 
 const API_BASE = 'https://api.osbdata.com';
-const TABLE = 'monthly_data';
+const TABLE_BASE = 'monthly_data';        // plain table — fast path
+const TABLE_YOY  = 'monthly_data_yoy';    // view with yoy_* columns
 
 const STATE_CODES = [
   'AR','AZ','CO','CT','DC','DE','IA','IL','IN','KS','KY','LA',
@@ -33,7 +34,18 @@ const COLUMNS = [
   { key: 'tax_paid',           group: 'metrics',  label: 'tax_paid' },
   { key: 'federal_excise_tax', group: 'metrics',  label: 'federal_excise_tax' },
   { key: 'hold_pct',           group: 'metrics',  label: 'hold_pct' },
+  // YoY columns — selecting any of these routes to /monthly_data_yoy.
+  // Growth values are decimals (0.10 = +10%); hold_diff is in pp as a decimal
+  // (0.01 = +1pp).
+  { key: 'yoy_handle',         group: 'yoy', label: 'yoy_handle' },
+  { key: 'yoy_standard_ggr',   group: 'yoy', label: 'yoy_standard_ggr' },
+  { key: 'yoy_hold_pct',       group: 'yoy', label: 'yoy_hold_pct' },
+  { key: 'yoy_handle_growth',  group: 'yoy', label: 'yoy_handle_growth' },
+  { key: 'yoy_ggr_growth',     group: 'yoy', label: 'yoy_ggr_growth' },
+  { key: 'yoy_hold_diff',      group: 'yoy', label: 'yoy_hold_diff' },
 ];
+
+const YOY_KEYS = COLUMNS.filter(c => c.group === 'yoy').map(c => c.key);
 
 const DEFAULT_COLUMNS = [
   'state_code','operator_standard','channel','period_end','handle','standard_ggr','hold_pct',
@@ -138,8 +150,13 @@ function buildUrl(state) {
   if (state.limit) {
     params.push(`limit=${state.limit}`);
   }
+  // Route to the YoY view only when YoY columns are selected — keeps the
+  // simple monthly_data path fast for the 95% of demos that don't need it.
+  const usesYoy = state.columns.some(c => YOY_KEYS.includes(c));
+  const table = usesYoy ? TABLE_YOY : TABLE_BASE;
+
   const qs = params.join('&');
-  return `${API_BASE}/${TABLE}${qs ? '?' + qs : ''}`;
+  return `${API_BASE}/${table}${qs ? '?' + qs : ''}`;
 }
 
 function buildCurl(url) {
@@ -419,9 +436,16 @@ export default function ApiBuilder() {
     }
   };
 
-  const visibleCols = showAdvancedCols
-    ? COLUMNS
-    : COLUMNS.filter(c => DEFAULT_COLUMNS.includes(c.key) || ['gross_revenue','promo_credits','net_revenue','payouts','tax_paid'].includes(c.key));
+  const visibleStandardCols = showAdvancedCols
+    ? COLUMNS.filter(c => c.group !== 'yoy')
+    : COLUMNS.filter(c =>
+        c.group !== 'yoy' && (
+          DEFAULT_COLUMNS.includes(c.key) ||
+          ['gross_revenue','promo_credits','net_revenue','payouts','tax_paid'].includes(c.key)
+        )
+      );
+  const yoyCols = COLUMNS.filter(c => c.group === 'yoy');
+  const usesYoy = columns.some(c => YOY_KEYS.includes(c));
 
   return (
     <div className="ab-page">
@@ -629,7 +653,7 @@ export default function ApiBuilder() {
             <span className="ab-hint">{columns.length}/{COLUMNS.length} selected — trims response size.</span>
           </div>
           <ChipPicker
-            options={visibleCols.map(c => c.key)}
+            options={visibleStandardCols.map(c => c.key)}
             selected={columns}
             onToggle={toggle(setColumns)}
           />
@@ -640,8 +664,24 @@ export default function ApiBuilder() {
             onClick={() => setShowAdvancedCols(v => !v)}
           >
             {showAdvancedCols ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-            {showAdvancedCols ? 'Hide' : 'Show'} all columns
+            {showAdvancedCols ? 'Hide' : 'Show'} all standard columns
           </button>
+
+          <div className="ab-col-group">
+            <div className="ab-col-group-head">
+              <span className="ab-col-group-title">Year-over-year</span>
+              <span className="ab-col-group-sub">
+                {usesYoy
+                  ? 'URL routes to /monthly_data_yoy when any of these are picked.'
+                  : 'Same month one year prior. Decimal values (0.10 = +10%, hold_diff in pp).'}
+              </span>
+            </div>
+            <ChipPicker
+              options={yoyCols.map(c => c.key)}
+              selected={columns}
+              onToggle={toggle(setColumns)}
+            />
+          </div>
         </section>
 
         {/* Sort & limit */}
