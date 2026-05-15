@@ -1,0 +1,12 @@
+[Unit]
+Description=OSB tracker — stale-state monitor (alerts if any state's latest data is past its publish window)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/osb-trackerv0
+EnvironmentFile=-/srv/osb-trackerv0/.env
+ExecStart=/srv/osb-trackerv0/.venv/bin/python /srv/osb-trackerv0/scripts/check_stale_states.py
+TimeoutStartSec=5min
+StandardOutput=journal
+StandardError=journal

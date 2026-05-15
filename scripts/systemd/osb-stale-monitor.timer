@@ -1,0 +1,9 @@
+[Unit]
+Description=Stale-state monitor — runs once daily at 14:00 UTC (10am ET)
+
+[Timer]
+OnCalendar=*-*-* 14:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
