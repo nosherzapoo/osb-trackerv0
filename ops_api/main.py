@@ -220,7 +220,7 @@ def notify_signup(body: SignupNotifyRequest, request: _Request):
 import urllib.request as _urlreq
 import urllib.error as _urlerr
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://hljwzntqywzepvwouyxr.supabase.co")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://auth.osbdata.com")
 SUPABASE_ANON_KEY = os.environ.get(
     "SUPABASE_PUBLISHABLE_KEY",
     "sb_publishable_RSlc6gLlCOAtuGTHLWsMwA_dOb9fHWR",
