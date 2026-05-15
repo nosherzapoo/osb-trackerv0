@@ -44,9 +44,17 @@ const COLUMNS = [
   { key: 'yoy_ggr_growth',     group: 'yoy', label: 'yoy_ggr_growth' },
   { key: 'yoy_hold_diff',      group: 'yoy', label: 'yoy_hold_diff' },
   { key: 'yoy_period_end',     group: 'yoy', label: 'yoy_period_end' },
+  // Provenance: where each row came from. Useful for audit / trust during
+  // demos — clients can click through to the regulator's exact file.
+  { key: 'source_url',         group: 'provenance', label: 'source_url' },
+  { key: 'source_report_url',  group: 'provenance', label: 'source_report_url' },
+  { key: 'source_file',        group: 'provenance', label: 'source_file' },
+  { key: 'source_screenshot',  group: 'provenance', label: 'source_screenshot' },
+  { key: 'scrape_timestamp',   group: 'provenance', label: 'scrape_timestamp' },
 ];
 
 const YOY_KEYS = COLUMNS.filter(c => c.group === 'yoy').map(c => c.key);
+const PROVENANCE_KEYS = COLUMNS.filter(c => c.group === 'provenance').map(c => c.key);
 
 const DEFAULT_COLUMNS = [
   'state_code','operator_standard','channel','period_end','handle','standard_ggr','hold_pct',
@@ -438,14 +446,15 @@ export default function ApiBuilder() {
   };
 
   const visibleStandardCols = showAdvancedCols
-    ? COLUMNS.filter(c => c.group !== 'yoy')
+    ? COLUMNS.filter(c => c.group !== 'yoy' && c.group !== 'provenance')
     : COLUMNS.filter(c =>
-        c.group !== 'yoy' && (
+        c.group !== 'yoy' && c.group !== 'provenance' && (
           DEFAULT_COLUMNS.includes(c.key) ||
           ['gross_revenue','promo_credits','net_revenue','payouts','tax_paid'].includes(c.key)
         )
       );
   const yoyCols = COLUMNS.filter(c => c.group === 'yoy');
+  const provenanceCols = COLUMNS.filter(c => c.group === 'provenance');
   const usesYoy = columns.some(c => YOY_KEYS.includes(c));
 
   return (
@@ -679,6 +688,20 @@ export default function ApiBuilder() {
             </div>
             <ChipPicker
               options={yoyCols.map(c => c.key)}
+              selected={columns}
+              onToggle={toggle(setColumns)}
+            />
+          </div>
+
+          <div className="ab-col-group">
+            <div className="ab-col-group-head">
+              <span className="ab-col-group-title">Provenance</span>
+              <span className="ab-col-group-sub">
+                Direct links to the exact regulator file each row was scraped from. <code>source_url</code> = file (PDF/XLSX); <code>source_report_url</code> = stable report page.
+              </span>
+            </div>
+            <ChipPicker
+              options={provenanceCols.map(c => c.key)}
               selected={columns}
               onToggle={toggle(setColumns)}
             />
