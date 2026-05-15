@@ -163,6 +163,87 @@ const FORMATS = [
   { key: 'pq',       label: 'Excel (M)',  build: buildPowerQuery },
 ];
 
+// Step-by-step walkthroughs. Each walkthrough is a list of step objects:
+//   { text: 'instruction' }
+//   { text: 'instruction', code: 'snippet using {URL}' }    // {URL} is replaced live
+//   { text: 'instruction', menu: 'Data → Get Data → ...' }  // styled as a UI path
+//   { tip: 'short callout' }
+function makeWalkthroughs(url) {
+  const sub = (s) => s.replace(/\{URL\}/g, url);
+  return [
+    {
+      key: 'excel-win',
+      label: 'Excel (Windows)',
+      blurb: 'Power Query refreshes the table on demand — the typical analyst workflow.',
+      steps: [
+        { text: 'Open Excel. Create a blank workbook.' },
+        { text: 'Click Get Data → From Other Sources → From Web.', menu: 'Data → Get Data → From Other Sources → From Web' },
+        { text: 'Paste the URL. Click OK.', code: sub('{URL}') },
+        { text: 'In the Power Query preview, click To Table at the top left. Accept the defaults.' },
+        { text: 'Click the ⇆ expand icon on the Column1 header → uncheck “Use original column name as prefix” → OK.' },
+        { text: 'Click Close & Load. Data appears in the worksheet.', menu: 'Home → Close & Load' },
+        { tip: 'To refresh later: Data → Refresh All (Ctrl+Alt+F5). Your model on top of the table updates automatically.' },
+      ],
+    },
+    {
+      key: 'excel-mac',
+      label: 'Excel (Mac)',
+      blurb: 'Mac Excel\'s “From Web” doesn\'t parse JSON properly — use Blank Query with one line of M code instead.',
+      steps: [
+        { text: 'Open Excel. Create a blank workbook.' },
+        { text: 'Click Get Data (Power Query) → Blank Query.', menu: 'Data → Get Data (Power Query) → Blank Query' },
+        { text: 'In the formula bar at the top of the Power Query editor, paste this single line and press Enter:', code: sub('= Json.Document(Web.Contents("{URL}"))') },
+        { text: 'You\'ll see a list of records. Right-click Column1 → To Table (defaults).' },
+        { text: 'Click the ⇆ expand icon on Column1 → uncheck “Use original column name as prefix” → OK.' },
+        { text: 'Click Close & Load.' },
+        { tip: 'Same Refresh All shortcut works: Cmd+Option+F5 (Mac).' },
+      ],
+    },
+    {
+      key: 'python',
+      label: 'Python',
+      blurb: 'One-liner with pandas. Works in Jupyter, scripts, Airflow, anywhere.',
+      steps: [
+        { text: 'Install pandas if you don\'t have it:', code: 'pip install pandas' },
+        { text: 'Read the URL straight into a DataFrame:', code: sub('import pandas as pd\ndf = pd.read_json("{URL}")\ndf.head()') },
+        { text: 'Refresh later by re-running pd.read_json — each call hits the live API.' },
+        { tip: 'For 50k+ rows or auth tokens later, switch to requests: `pd.DataFrame(requests.get(url, headers={...}).json())`.' },
+      ],
+    },
+    {
+      key: 'gsheets',
+      label: 'Google Sheets',
+      blurb: 'Sheets doesn\'t parse JSON natively. Quickest path: a tiny custom function.',
+      steps: [
+        { text: 'In your sheet, open Extensions → Apps Script.', menu: 'Extensions → Apps Script' },
+        { text: 'Replace the editor contents with this function, then click Save:', code: 'function OSBDATA(url) {\n  const resp = UrlFetchApp.fetch(url);\n  const rows = JSON.parse(resp.getContentText());\n  if (!rows.length) return [["(no rows)"]];\n  const headers = Object.keys(rows[0]);\n  return [headers].concat(\n    rows.map(r => headers.map(h => r[h] == null ? "" : r[h]))\n  );\n}' },
+        { text: 'Back in the sheet, in any cell, type:', code: sub('=OSBDATA("{URL}")') },
+        { tip: 'Right-click the cell → View more cell actions → Refresh, to re-fetch. Or use any sheet trigger.' },
+      ],
+    },
+    {
+      key: 'js',
+      label: 'JavaScript / Web',
+      blurb: 'fetch() in any modern browser, Node, Deno, or framework.',
+      steps: [
+        { text: 'Use the fetch API:', code: sub('const resp = await fetch("{URL}");\nconst data = await resp.json();\nconsole.log(data);') },
+        { text: 'In React, drop that in a useEffect or a React Query hook.' },
+        { tip: 'CORS is open — calls from any origin work.' },
+      ],
+    },
+    {
+      key: 'curl',
+      label: 'cURL / Terminal',
+      blurb: 'Quickest way to validate a URL works before pasting it elsewhere.',
+      steps: [
+        { text: 'Run the request:', code: sub('curl "{URL}"') },
+        { text: 'Save to a file:', code: sub('curl "{URL}" > osb_data.json') },
+        { text: 'Pretty-print with jq:', code: sub('curl -s "{URL}" | jq \'.\'') },
+      ],
+    },
+  ];
+}
+
 function ChipPicker({ options, selected, onToggle, renderOption, dot }) {
   return (
     <div className="ab-chips">
@@ -226,6 +307,7 @@ export default function ApiBuilder() {
 
   const [showAdvancedCols, setShowAdvancedCols] = useState(false);
   const [outputFormat, setOutputFormat] = useState('url');
+  const [walkthroughKey, setWalkthroughKey] = useState('excel-win');
 
   // Try-it state
   const [tryLoading, setTryLoading] = useState(false);
@@ -242,6 +324,8 @@ export default function ApiBuilder() {
     const fmt = FORMATS.find(f => f.key === outputFormat) || FORMATS[0];
     return fmt.build(url);
   }, [url, outputFormat]);
+  const walkthroughs = useMemo(() => makeWalkthroughs(url), [url]);
+  const activeWalkthrough = walkthroughs.find(w => w.key === walkthroughKey) || walkthroughs[0];
 
   // Reset try-it whenever URL changes
   useEffect(() => {
@@ -559,6 +643,60 @@ export default function ApiBuilder() {
                 value={limit} onChange={(e) => setLimit(Number(e.target.value) || 0)}
               />
             </div>
+          </div>
+        </section>
+
+        {/* Walkthrough */}
+        <section className="ab-section">
+          <div className="ab-section-title">
+            <h2>How to use this URL</h2>
+            <span className="ab-hint">Step-by-step for each tool — your URL is already filled in.</span>
+          </div>
+
+          <div className="ab-walk-tabs" role="tablist">
+            {walkthroughs.map(w => (
+              <button
+                key={w.key}
+                type="button"
+                role="tab"
+                aria-selected={walkthroughKey === w.key}
+                className={`ab-walk-tab ${walkthroughKey === w.key ? 'active' : ''}`}
+                onClick={() => setWalkthroughKey(w.key)}
+              >{w.label}</button>
+            ))}
+          </div>
+
+          <div className="ab-walk-content">
+            {activeWalkthrough?.blurb && (
+              <p className="ab-walk-blurb">{activeWalkthrough.blurb}</p>
+            )}
+            <ol className="ab-walk-steps">
+              {activeWalkthrough?.steps.map((step, i) => (
+                <li key={i} className={step.tip ? 'is-tip' : ''}>
+                  {step.tip ? (
+                    <div className="ab-walk-tip">
+                      <span className="ab-walk-tip-label">Tip</span>
+                      <span>{step.tip}</span>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="ab-walk-step-text">
+                        {step.text}
+                        {step.menu && (
+                          <div className="ab-walk-menu">{step.menu}</div>
+                        )}
+                      </div>
+                      {step.code && (
+                        <div className="ab-walk-code">
+                          <pre>{step.code}</pre>
+                          <CopyButton text={step.code} label="Copy" />
+                        </div>
+                      )}
+                    </>
+                  )}
+                </li>
+              ))}
+            </ol>
           </div>
         </section>
 
