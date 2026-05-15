@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily notification digest at 12:00 UTC (8am ET)
+
+[Timer]
+OnCalendar=*-*-* 12:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

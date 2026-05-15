@@ -30,40 +30,89 @@ DASHBOARD_URL = "https://osbdata.com"
 
 
 def load_subscribers():
-    # Try Supabase first
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-        supabase_url = os.environ.get('SUPABASE_URL')
-        supabase_key = os.environ.get('SUPABASE_KEY')
-        if supabase_url and supabase_key:
-            from supabase import create_client
-            client = create_client(supabase_url, supabase_key)
-            resp = client.table('subscribers').select('*').eq('active', True).execute()
-            if resp.data:
-                subs = []
-                for row in resp.data:
-                    states = row.get('states', 'all')
-                    if isinstance(states, str) and states != 'all':
-                        states = json.loads(states)
-                    subs.append({
-                        'email': row['email'],
-                        'name': row.get('name', ''),
-                        'states': states,
-                        'frequency': row.get('frequency', 'immediate'),
-                    })
-                print(f"Loaded {len(subs)} subscriber(s) from Supabase")
-                return subs
-    except Exception as e:
-        print(f"Supabase subscribers unavailable ({e}), falling back to JSON")
+    """Load subscribers from auth_ext.notification_prefs (Postgres).
 
-    # Fallback: JSON file
+    Returns list of dicts with email, name, states (None = all), frequency,
+    user_id. Falls back to the legacy JSON file if Postgres is unreachable
+    so cron jobs survive DB hiccups.
+    """
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+        pw_path = Path("/root/.osb_pg_pass")
+        if pw_path.exists():
+            pw = pw_path.read_text().strip()
+        else:
+            pw = os.environ.get("OPS_PG_PASSWORD") or ""
+        dsn = f"postgres://osb_writer:{pw}@127.0.0.1:5432/osb_data"
+        with psycopg.connect(dsn, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT user_id, email, name, states, frequency, enabled "
+                    "FROM auth_ext.notification_prefs WHERE enabled = TRUE"
+                )
+                rows = cur.fetchall()
+        subs = []
+        for r in rows:
+            subs.append({
+                "user_id": str(r["user_id"]),
+                "email": r["email"],
+                "name": r.get("name") or "",
+                "states": r.get("states") or "all",
+                "frequency": r.get("frequency") or "immediate",
+            })
+        print(f"Loaded {len(subs)} subscriber(s) from Postgres")
+        return subs
+    except Exception as e:
+        print(f"Postgres subscriber lookup failed ({e}), falling back to JSON")
+
+    # Last-resort fallback so the cron job doesn't crash entirely.
     if not SUBSCRIBERS_FILE.exists():
-        print("No subscribers.json found")
+        print("No subscribers.json found either")
         return []
     with open(SUBSCRIBERS_FILE) as f:
         data = json.load(f)
     return data.get("subscribers", [])
+
+
+def _enqueue_digest_items(user_id: str, summary: dict, states: list[str]) -> int:
+    """Append per-state items to auth_ext.pending_digest_items for a
+    daily/weekly subscriber. Returns count appended.
+    """
+    try:
+        import psycopg
+        pw_path = Path("/root/.osb_pg_pass")
+        if pw_path.exists():
+            pw = pw_path.read_text().strip()
+        else:
+            pw = os.environ.get("OPS_PG_PASSWORD") or ""
+        dsn = f"postgres://osb_writer:{pw}@127.0.0.1:5432/osb_data"
+        appended = 0
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                for sc in states:
+                    s = summary.get("states", {}).get(sc)
+                    if not s:
+                        continue
+                    cur.execute(
+                        """
+                        INSERT INTO auth_ext.pending_digest_items
+                          (user_id, state_code, period_end, period_type,
+                           handle, standard_ggr, hold_pct, yoy_handle)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            user_id, sc, s.get("period"), s.get("period_type"),
+                            s.get("handle"), s.get("ggr"), s.get("hold_pct"),
+                            s.get("yoy_handle"),
+                        ),
+                    )
+                    appended += 1
+            conn.commit()
+        return appended
+    except Exception as e:
+        print(f"  failed to enqueue digest items: {e}")
+        return 0
 
 
 def load_summary():
@@ -314,24 +363,37 @@ def main():
         state_list_short += f" +{len(updated_states) - 5}"
 
     sent = 0
+    queued = 0
     skipped = 0
 
     for sub in subscribers:
         email = sub.get("email")
         name = sub.get("name", "there")
+        frequency = (sub.get("frequency") or "immediate").lower()
 
         if not email:
             continue
 
         # Filter to subscriber's states
         filtered = filter_summary_for_subscriber(summary, sub)
-
         if not filtered.get("states"):
             print(f"  {email}: no relevant updates, skipping")
             skipped += 1
             continue
 
-        # Render email
+        if frequency in ("daily", "weekly"):
+            # Queue items for the digest cron job.
+            user_id = sub.get("user_id")
+            if not user_id:
+                print(f"  {email}: {frequency} digest skipped (no user_id)")
+                skipped += 1
+                continue
+            n = _enqueue_digest_items(user_id, filtered, list(filtered["states"].keys()))
+            print(f"  {email}: queued {n} state(s) for {frequency} digest")
+            queued += 1
+            continue
+
+        # frequency == 'immediate': render and send now.
         html = render_html_email(filtered, name)
         if not html:
             skipped += 1
@@ -345,7 +407,7 @@ def main():
         else:
             print(f"  {email}: failed")
 
-    print(f"\nNotifications: {sent} sent, {skipped} skipped")
+    print(f"\nNotifications: {sent} sent, {queued} queued for digest, {skipped} skipped")
 
 
 if __name__ == "__main__":

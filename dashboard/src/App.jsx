@@ -12,6 +12,7 @@ import DocsPage from './components/DocsPage';
 import FeedPage from './components/FeedPage';
 import EmailBanner from './components/EmailBanner';
 import PreviewBanner from './components/PreviewBanner';
+import NotificationsPage from './components/NotificationsPage';
 import { useAuth } from './auth/AuthContext';
 import { PREVIEW_CUTOFF } from './auth/clients';
 
@@ -79,6 +80,9 @@ export default function App() {
             )}
             {activeView === 'docs' && (
               <DocsPage />
+            )}
+            {activeView === 'notifications' && (
+              <NotificationsPage />
             )}
           </ErrorBoundary>
         </main>

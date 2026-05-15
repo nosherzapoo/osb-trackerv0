@@ -1,0 +1,12 @@
+[Unit]
+Description=OSB tracker — daily notification digest
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/osb-trackerv0
+EnvironmentFile=-/srv/osb-trackerv0/.env
+ExecStart=/srv/osb-trackerv0/.venv/bin/python /srv/osb-trackerv0/scripts/send_digest.py --frequency daily
+TimeoutStartSec=10min
+StandardOutput=journal
+StandardError=journal

@@ -99,6 +99,7 @@ class SignupNotifyRequest(BaseModel):
     email: str
     name: str | None = None
     company: str | None = None
+    user_id: str | None = None  # Supabase user UUID, used to seed prefs row
 
 
 _EMAIL_RE = _re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -173,8 +174,10 @@ def _send_signup_email(payload: SignupNotifyRequest, ip: str) -> bool:
 @app.post("/auth/notify-signup")
 def notify_signup(body: SignupNotifyRequest, request: _Request):
     """Public endpoint — dashboard calls this after a successful Supabase
-    signup so we get an email about the new user. Best-effort: errors are
-    swallowed so a transient SMTP problem can't break the signup UX.
+    signup so we get an email about the new user AND we create a default
+    notification-prefs row (all states, immediate frequency) so emails
+    start flowing on the next scrape. Best-effort: errors are swallowed
+    so a transient problem can't break the signup UX.
     """
     if not body.email or not _EMAIL_RE.match(body.email):
         raise HTTPException(status_code=400, detail="invalid email")
@@ -183,8 +186,157 @@ def notify_signup(body: SignupNotifyRequest, request: _Request):
     if _rate_limited(ip):
         raise HTTPException(status_code=429, detail="too many requests")
 
+    # Best-effort: insert default prefs row keyed by Supabase user_id.
+    if body.user_id:
+        try:
+            db.query_one(
+                """
+                INSERT INTO auth_ext.notification_prefs
+                  (user_id, email, name, company, states, frequency, enabled)
+                VALUES (%s, %s, %s, %s, NULL, 'immediate', TRUE)
+                ON CONFLICT (user_id) DO UPDATE
+                  SET email = EXCLUDED.email,
+                      name = COALESCE(EXCLUDED.name, auth_ext.notification_prefs.name),
+                      company = COALESCE(EXCLUDED.company, auth_ext.notification_prefs.company),
+                      updated_at = now()
+                RETURNING user_id
+                """,
+                (body.user_id, body.email, body.name, body.company),
+            )
+        except Exception:
+            # Non-fatal: signup proceeds. We can backfill the row later.
+            pass
+
     sent = _send_signup_email(body, ip)
     return {"ok": True, "emailed": sent}
+
+
+# =============================================================================
+# Notification preferences — auth'd via Supabase JWT (verified by round-trip
+# to Supabase's /auth/v1/user). User-scoped: each call only sees/edits the
+# row belonging to the JWT holder.
+# =============================================================================
+
+import urllib.request as _urlreq
+import urllib.error as _urlerr
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://hljwzntqywzepvwouyxr.supabase.co")
+SUPABASE_ANON_KEY = os.environ.get(
+    "SUPABASE_PUBLISHABLE_KEY",
+    "sb_publishable_RSlc6gLlCOAtuGTHLWsMwA_dOb9fHWR",
+)
+_VALID_FREQUENCIES = {"immediate", "daily", "weekly"}
+
+
+def _verify_supabase_jwt(authorization: str | None) -> dict:
+    """Validates the bearer token against Supabase's /auth/v1/user endpoint.
+    Returns the verified user dict ({id, email, ...}) or raises 401.
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    token = authorization.split(" ", 1)[1].strip()
+    req = _urlreq.Request(
+        f"{SUPABASE_URL}/auth/v1/user",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "apikey": SUPABASE_ANON_KEY,
+        },
+    )
+    try:
+        with _urlreq.urlopen(req, timeout=5) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+            if not payload.get("id"):
+                raise HTTPException(status_code=401, detail="invalid token payload")
+            return payload
+    except _urlerr.HTTPError as e:
+        raise HTTPException(status_code=401, detail=f"supabase rejected token ({e.code})")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"supabase verify failed: {e}")
+
+
+class PrefsBody(BaseModel):
+    states: list[str] | None = None
+    frequency: str = "immediate"
+    enabled: bool = True
+
+
+def _supa_user(request: _Request) -> dict:
+    return _verify_supabase_jwt(request.headers.get("authorization"))
+
+
+@app.get("/notifications/prefs")
+def get_prefs(request: _Request):
+    user = _supa_user(request)
+    user_id = user["id"]
+    row = db.query_one(
+        """
+        SELECT user_id, email, name, company, states, frequency, enabled,
+               created_at, updated_at
+        FROM auth_ext.notification_prefs
+        WHERE user_id = %s
+        """,
+        (user_id,),
+    )
+    if not row:
+        # Lazy-create on first access (handles users created before the
+        # prefs schema existed).
+        meta = (user.get("user_metadata") or {})
+        db.query_one(
+            """
+            INSERT INTO auth_ext.notification_prefs
+              (user_id, email, name, company, states, frequency, enabled)
+            VALUES (%s, %s, %s, %s, NULL, 'immediate', TRUE)
+            ON CONFLICT (user_id) DO NOTHING
+            RETURNING user_id
+            """,
+            (user_id, user.get("email") or "", meta.get("name"), meta.get("company")),
+        )
+        row = db.query_one(
+            "SELECT user_id, email, name, company, states, frequency, enabled, "
+            "created_at, updated_at FROM auth_ext.notification_prefs WHERE user_id = %s",
+            (user_id,),
+        )
+    return row
+
+
+@app.put("/notifications/prefs")
+def put_prefs(body: PrefsBody, request: _Request):
+    user = _supa_user(request)
+    user_id = user["id"]
+    if body.frequency not in _VALID_FREQUENCIES:
+        raise HTTPException(status_code=400, detail="invalid frequency")
+    states = body.states  # None or list[str]
+    if states is not None:
+        # Normalize: uppercase, strip, dedupe; reject empty list (use 'all'
+        # by passing null in JSON).
+        states = sorted({s.strip().upper() for s in states if s and s.strip()})
+        if not states:
+            states = None
+
+    db.query_one(
+        """
+        INSERT INTO auth_ext.notification_prefs
+          (user_id, email, name, company, states, frequency, enabled)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (user_id) DO UPDATE
+          SET states = EXCLUDED.states,
+              frequency = EXCLUDED.frequency,
+              enabled = EXCLUDED.enabled,
+              email = EXCLUDED.email,
+              updated_at = now()
+        RETURNING user_id
+        """,
+        (
+            user_id,
+            user.get("email") or "",
+            (user.get("user_metadata") or {}).get("name"),
+            (user.get("user_metadata") or {}).get("company"),
+            states,
+            body.frequency,
+            body.enabled,
+        ),
+    )
+    return {"ok": True}
 
 
 # =============================================================================

@@ -1,4 +1,4 @@
-import { Globe, MapPin, Users, GitCompareArrows, BarChart3, Table2, BookOpen, Radio, LogIn, LogOut, Lock, UserPlus } from 'lucide-react';
+import { Globe, MapPin, Users, GitCompareArrows, BarChart3, Table2, BookOpen, Radio, LogIn, LogOut, Lock, UserPlus, Mail } from 'lucide-react';
 import { useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import LoginModal from './LoginModal';
@@ -13,6 +13,7 @@ const NAV_ITEMS = [
   { id: 'state', label: 'State Deep Dive', icon: MapPin },
   { id: 'data', label: 'Data Table', icon: Table2 },
   { id: 'docs', label: 'API Docs', icon: BookOpen },
+  { id: 'notifications', label: 'Notifications', icon: Mail, requiresAuth: true },
 ];
 
 export default function Sidebar({ activeView, onNavigate, dataAsOf }) {
@@ -28,7 +29,7 @@ export default function Sidebar({ activeView, onNavigate, dataAsOf }) {
       </div>
       <div className="sidebar-nav" role="tablist" aria-label="Dashboard views">
         <div className="nav-section-label">Views</div>
-        {NAV_ITEMS.map(item => (
+        {NAV_ITEMS.filter(item => !item.requiresAuth || isAuthenticated).map(item => (
           <button
             key={item.id}
             className={`nav-item ${activeView === item.id ? 'active' : ''}`}

@@ -90,7 +90,8 @@ export function AuthProvider({ children }) {
 
     // Fire-and-forget notification to ops (lets us track new signups and
     // follow up). Doesn't block the user's experience — any error here is
-    // silently swallowed since the actual signup succeeded.
+    // silently swallowed since the actual signup succeeded. Includes
+    // user_id so the backend can seed the notification-prefs row.
     try {
       fetch('https://api.osbdata.com/ops/auth/notify-signup', {
         method: 'POST',
@@ -99,6 +100,7 @@ export function AuthProvider({ children }) {
           email: email.trim(),
           name: name || '',
           company: company || '',
+          user_id: data.user?.id || data.session?.user?.id || null,
         }),
       }).catch(() => {});
     } catch {}
