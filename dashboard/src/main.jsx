@@ -8,6 +8,7 @@ import App from './App';
 ReactGA.initialize('G-WJ6TQ113YS');
 import LandingPage from './components/LandingPage';
 import ApiAccessPage from './components/ApiAccessPage';
+import ApiBuilder from './components/ApiBuilder';
 import OpsApp from './ops/OpsApp';
 import MarketsApp from './markets/MarketsApp';
 import BusinessApp from './markets/business/BusinessApp';
@@ -30,6 +31,7 @@ createRoot(document.getElementById('root')).render(
         <Routes>
           <Route path="/" element={<LandingPage />} />
           <Route path="/api-access" element={<ApiAccessPage />} />
+          <Route path="/api-builder" element={<ApiBuilder />} />
           <Route path="/state/:code" element={<StateRedirect />} />
           <Route path="/operators" element={<OperatorRedirect />} />
           <Route path="/app/*" element={<App />} />

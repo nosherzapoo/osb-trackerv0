@@ -315,6 +315,11 @@ export default function DocsPage() {
           <h2 className="page-title">API Docs</h2>
           <div className="page-subtitle">API reference, data dictionary, and state profiles</div>
         </div>
+        <div className="page-header-controls">
+          <a href="/api-builder" target="_blank" rel="noreferrer" className="btn" style={{ background: 'var(--accent-primary)', color: '#fff', borderColor: 'var(--accent-primary)' }}>
+            Open URL Builder &rarr;
+          </a>
+        </div>
       </div>
 
       <div className="view-toggle" style={{ marginBottom: 'var(--space-6)' }}>
