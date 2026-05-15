@@ -3277,3 +3277,43 @@ select.ab-input {
   letter-spacing: 0.06em;
   border-radius: 3px;
 }
+
+/* ─── API Builder refresh-friendliness banner ──────────── */
+.ab-refresh-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: var(--space-3);
+  border-radius: 6px;
+  border: 1px solid;
+  font: 400 12px/1.4 var(--font-body);
+}
+.ab-refresh-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.ab-refresh-ok {
+  background: rgba(64, 208, 176, 0.10);
+  border-color: rgba(64, 208, 176, 0.30);
+  color: var(--text-primary);
+}
+.ab-refresh-ok .ab-refresh-dot {
+  background: var(--accent-secondary);
+  box-shadow: 0 0 6px var(--accent-secondary);
+}
+.ab-refresh-warn {
+  background: rgba(240, 176, 64, 0.08);
+  border-color: rgba(240, 176, 64, 0.30);
+  color: var(--text-primary);
+}
+.ab-refresh-warn .ab-refresh-dot { background: #f0b040; }
+.ab-refresh-hint {
+  background: var(--bg-elevated);
+  border-color: var(--border-subtle, #1a1a28);
+  color: var(--text-secondary);
+}
+.ab-refresh-hint .ab-refresh-dot { background: var(--text-tertiary); }

@@ -180,29 +180,33 @@ function makeWalkthroughs(url) {
     {
       key: 'excel-win',
       label: 'Excel (Windows)',
-      blurb: 'Power Query refreshes the table on demand — the typical analyst workflow.',
+      blurb: 'Power Query refreshes the table on demand — the typical analyst workflow. New rows from the regulator (e.g. NY\'s weekly publish) appear automatically the next time you Refresh.',
       steps: [
         { text: 'Open Excel. Create a blank workbook.' },
         { text: 'Click Get Data → From Other Sources → From Web.', menu: 'Data → Get Data → From Other Sources → From Web' },
         { text: 'Paste the URL. Click OK.', code: sub('{URL}') },
         { text: 'In the Power Query preview, click To Table at the top left. Accept the defaults.' },
-        { text: 'Click the ⇆ expand icon on the Column1 header → uncheck “Use original column name as prefix” → OK.' },
+        { text: 'Click the ⇆ expand icon on the Column1 header → uncheck "Use original column name as prefix" → OK.' },
         { text: 'Click Close & Load. Data appears in the worksheet.', menu: 'Home → Close & Load' },
-        { tip: 'To refresh later: Data → Refresh All (Ctrl+Alt+F5). Your model on top of the table updates automatically.' },
+        { text: 'To pull new data: Data → Refresh All (Ctrl+Alt+F5). The table re-fetches the URL and overwrites with the latest rows.' },
+        { text: 'Optional — auto-refresh: open Queries & Connections (right side panel), right-click your query → Properties. Tick "Refresh data when opening the file", and/or "Refresh every N minutes". Click OK.', menu: 'Right-click query → Properties → Usage tab' },
+        { tip: 'For best results: keep the URL sorted by period_end desc with no end-date filter — that way newly published periods naturally land at the top of the refreshed table.' },
       ],
     },
     {
       key: 'excel-mac',
       label: 'Excel (Mac)',
-      blurb: 'Mac Excel\'s “From Web” doesn\'t parse JSON properly — use Blank Query with one line of M code instead.',
+      blurb: 'Mac Excel\'s "From Web" doesn\'t parse JSON properly — use Blank Query with one line of M code instead. Refresh works the same way as Windows.',
       steps: [
         { text: 'Open Excel. Create a blank workbook.' },
         { text: 'Click Get Data (Power Query) → Blank Query.', menu: 'Data → Get Data (Power Query) → Blank Query' },
         { text: 'In the formula bar at the top of the Power Query editor, paste this single line and press Enter:', code: sub('= Json.Document(Web.Contents("{URL}"))') },
         { text: 'You\'ll see a list of records. Right-click Column1 → To Table (defaults).' },
-        { text: 'Click the ⇆ expand icon on Column1 → uncheck “Use original column name as prefix” → OK.' },
+        { text: 'Click the ⇆ expand icon on Column1 → uncheck "Use original column name as prefix" → OK.' },
         { text: 'Click Close & Load.' },
-        { tip: 'Same Refresh All shortcut works: Cmd+Option+F5 (Mac).' },
+        { text: 'To pull new data: Data → Refresh All (Cmd+Option+F5). The table re-fetches the URL.' },
+        { text: 'Optional — auto-refresh on open: Data → Get Data (Power Query). Click the ⋯ next to your query → Properties. Tick "Refresh data when opening the file".', menu: '⋯ next to query → Properties' },
+        { tip: 'Keep the URL sorted by period_end desc with no end-date filter so newly published periods land at the top after each refresh.' },
       ],
     },
     {
@@ -427,6 +431,9 @@ export default function ApiBuilder() {
             <a href="https://api.osbdata.com" target="_blank" rel="noreferrer" className="ab-link">API root <ExternalLink size={12} /></a>
           </div>
         </header>
+
+        {/* Refresh-friendliness indicator */}
+        <RefreshFriendly to={to} sortCol={sortCol} sortDir={sortDir} />
 
         {/* Sticky output panel */}
         <div className="ab-output">
@@ -711,6 +718,33 @@ export default function ApiBuilder() {
           <div>Read-only public API · <code>https://api.osbdata.com</code> · Contact: <a href="mailto:khimor@osbdata.com">khimor@osbdata.com</a></div>
         </footer>
       </div>
+    </div>
+  );
+}
+
+// Tells the user whether their URL will pick up new data on Excel/cron
+// refreshes. Frozen = end date pinned, or not sorted by latest first.
+function RefreshFriendly({ to, sortCol, sortDir }) {
+  const hasEndDate = !!to;
+  const sortedLatestFirst = sortCol === 'period_end' && sortDir === 'desc';
+  const friendly = !hasEndDate && sortedLatestFirst;
+
+  let msg, cls;
+  if (friendly) {
+    msg = 'Refresh-friendly — new periods will appear at the top of your table on next refresh.';
+    cls = 'ab-refresh-ok';
+  } else if (hasEndDate) {
+    msg = 'End date is set — this URL is frozen to that date. New periods after it will NOT appear on refresh.';
+    cls = 'ab-refresh-warn';
+  } else {
+    msg = 'Sort by period_end desc to make sure newly published periods land at the top after a refresh.';
+    cls = 'ab-refresh-hint';
+  }
+
+  return (
+    <div className={`ab-refresh-banner ${cls}`}>
+      <span className="ab-refresh-dot" />
+      <span>{msg}</span>
     </div>
   );
 }
