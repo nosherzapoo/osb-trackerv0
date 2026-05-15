@@ -85,21 +85,27 @@ const PRESETS = [
   },
 ];
 
-// PostgREST values that contain commas, parentheses, or spaces need to be
-// double-quoted inside in.(...). Operators with spaces ("ESPN Bet",
-// "Hard Rock Bet") trip this — we always quote operator strings.
-function quoteValue(v) {
-  return `"${String(v).replace(/"/g, '\\"')}"`;
+// PostgREST values that contain commas, parens, spaces, or quotes must be
+// wrapped in literal " chars inside in.(...). We URL-encode the wrapping
+// quotes as %22 so the resulting URL contains no literal " — this matters
+// for Excel Power Query (M parser closes its string on a literal "), and
+// is cleaner for cURL/shells too. Values without special chars are left
+// un-quoted for readability.
+function urlValue(v) {
+  const s = String(v);
+  if (/[,()"\s]/.test(s)) {
+    return '%22' + encodeURIComponent(s) + '%22';
+  }
+  return encodeURIComponent(s);
 }
 
 function buildUrl(state) {
   const params = [];
   if (state.states.length > 0) {
-    params.push(`state_code=in.(${state.states.join(',')})`);
+    params.push(`state_code=in.(${state.states.map(urlValue).join(',')})`);
   }
   if (state.operators.length > 0) {
-    const vals = state.operators.map(quoteValue).join(',');
-    params.push(`operator_standard=in.(${vals})`);
+    params.push(`operator_standard=in.(${state.operators.map(urlValue).join(',')})`);
   }
   if (state.channel && state.channel !== 'any') {
     if (state.channel === 'null') {
