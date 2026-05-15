@@ -43,6 +43,7 @@ const COLUMNS = [
   { key: 'yoy_handle_growth',  group: 'yoy', label: 'yoy_handle_growth' },
   { key: 'yoy_ggr_growth',     group: 'yoy', label: 'yoy_ggr_growth' },
   { key: 'yoy_hold_diff',      group: 'yoy', label: 'yoy_hold_diff' },
+  { key: 'yoy_period_end',     group: 'yoy', label: 'yoy_period_end' },
 ];
 
 const YOY_KEYS = COLUMNS.filter(c => c.group === 'yoy').map(c => c.key);
@@ -673,7 +674,7 @@ export default function ApiBuilder() {
               <span className="ab-col-group-sub">
                 {usesYoy
                   ? 'URL routes to /monthly_data_yoy when any of these are picked.'
-                  : 'Same month one year prior. Decimal values (0.10 = +10%, hold_diff in pp).'}
+                  : 'Same period one year prior (weekly matches within ±4 days). Decimal values (0.10 = +10%, hold_diff in pp).'}
               </span>
             </div>
             <ChipPicker

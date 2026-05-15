@@ -11,10 +11,14 @@
 --   yoy_hold_diff     = current_hold - prior_hold (percentage-point delta as decimal)
 --
 -- Match key: (state_code, operator_standard, channel, sport_category,
--- period_type, period_end - 1 year). Weekly rows will rarely match because
--- the exact date one year prior is usually a different day-of-week — that's
--- expected; downstream consumers can filter to period_type=eq.monthly for
--- a complete picture.
+-- period_type) plus period_end within a ±4-day window centered on
+-- "exactly one year ago". For monthly data this catches the same calendar
+-- month a year prior; for weekly data it catches the closest-aligned week
+-- even when the day-of-week shifts by 1-2 days year-over-year.
+--
+-- We use LATERAL + ORDER BY ABS + LIMIT 1 to pick exactly one match per
+-- row, avoiding the row multiplication that a plain LEFT JOIN with a
+-- range would produce when two weekly periods both fall in the window.
 
 DROP VIEW IF EXISTS api.monthly_data_yoy CASCADE;
 
@@ -24,6 +28,7 @@ SELECT
   py.handle        AS yoy_handle,
   py.standard_ggr  AS yoy_standard_ggr,
   py.hold_pct      AS yoy_hold_pct,
+  py.period_end    AS yoy_period_end,
   CASE
     WHEN py.handle IS NULL OR py.handle = 0 THEN NULL
     ELSE (m.handle - py.handle)::numeric / py.handle::numeric
@@ -37,13 +42,24 @@ SELECT
     ELSE (m.hold_pct - py.hold_pct)
   END AS yoy_hold_diff
 FROM api.monthly_data m
-LEFT JOIN api.monthly_data py
-  ON py.state_code         = m.state_code
- AND py.operator_standard  = m.operator_standard
- AND py.channel            IS NOT DISTINCT FROM m.channel
- AND py.sport_category     IS NOT DISTINCT FROM m.sport_category
- AND py.period_type        = m.period_type
- AND py.period_end         = (m.period_end - INTERVAL '1 year')::date;
+LEFT JOIN LATERAL (
+  SELECT
+    candidate.handle,
+    candidate.standard_ggr,
+    candidate.hold_pct,
+    candidate.period_end
+  FROM api.monthly_data candidate
+  WHERE candidate.state_code        = m.state_code
+    AND candidate.operator_standard = m.operator_standard
+    AND candidate.channel           IS NOT DISTINCT FROM m.channel
+    AND candidate.sport_category    IS NOT DISTINCT FROM m.sport_category
+    AND candidate.period_type       = m.period_type
+    AND candidate.period_end BETWEEN
+            (m.period_end - INTERVAL '1 year' - INTERVAL '4 days')::date
+        AND (m.period_end - INTERVAL '1 year' + INTERVAL '4 days')::date
+  ORDER BY ABS(candidate.period_end - (m.period_end - INTERVAL '1 year')::date)
+  LIMIT 1
+) py ON TRUE;
 
 GRANT SELECT ON api.monthly_data_yoy TO web_anon;
 GRANT SELECT ON api.monthly_data_yoy TO authenticator;
