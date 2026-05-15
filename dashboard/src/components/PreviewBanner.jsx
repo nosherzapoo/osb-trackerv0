@@ -35,7 +35,7 @@ export default function PreviewBanner() {
             className="preview-banner-cta"
             onClick={() => setShowSignup(true)}
           >
-            Get free access
+            Get access
           </button>
         </div>
       </div>

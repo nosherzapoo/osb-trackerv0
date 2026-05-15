@@ -66,10 +66,10 @@ export default function Sidebar({ activeView, onNavigate, dataAsOf }) {
             <button
               className="sidebar-signup-btn"
               onClick={() => setShowSignup(true)}
-              aria-label="Create a free account for live data"
+              aria-label="Create an account for live data"
             >
               <UserPlus size={14} aria-hidden="true" />
-              <span>Get free access</span>
+              <span>Get access</span>
             </button>
             <button
               className="sidebar-login-btn-small"

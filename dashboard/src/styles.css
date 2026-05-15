@@ -340,6 +340,8 @@ body {
   color: var(--text-secondary);
 }
 .login-label input {
+  width: 100%;
+  min-width: 0;
   padding: 10px 12px;
   background: var(--bg-input);
   border: 1px solid var(--border-subtle, #1a1a28);
@@ -350,6 +352,8 @@ body {
   transition: border-color 0.15s ease;
 }
 .login-label input:focus { border-color: var(--accent-primary); }
+.login-label { min-width: 0; }
+.login-row-2 > .login-label { min-width: 0; }
 .login-error {
   padding: 8px 10px;
   background: rgba(240, 96, 96, 0.12);
