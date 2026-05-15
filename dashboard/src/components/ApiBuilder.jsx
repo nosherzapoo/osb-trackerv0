@@ -43,18 +43,24 @@ const SORT_COLUMNS = [
   'period_end','state_code','operator_standard','handle','standard_ggr','hold_pct',
 ];
 
+// States that publish weekly per-operator data alongside (or instead of)
+// monthly. Use this to nudge users toward weekly when the monthly per-operator
+// stream lags significantly (NY's monthly per-operator typically trails its
+// weekly by 4-6 weeks).
+const WEEKLY_STATES = ['NY', 'WV', 'MT'];
+
 const PRESETS = [
   {
-    name: 'Live market share (NY top 5)',
+    name: 'Live market share (NY weekly top 5)',
     config: {
       states: ['NY'],
       operators: ['FanDuel','DraftKings','BetMGM','Caesars','Fanatics'],
       channel: 'any',
-      periodType: 'monthly',
+      periodType: 'weekly',
       from: '', to: '',
       columns: ['period_end','operator_standard','handle','standard_ggr'],
       sortCol: 'period_end', sortDir: 'desc',
-      limit: 300,
+      limit: 500,
     },
   },
   {
@@ -303,17 +309,20 @@ function CopyButton({ text, label = 'Copy' }) {
 }
 
 export default function ApiBuilder() {
-  const [states, setStates] = useState([]);
-  const [operators, setOperators] = useState([]);
+  // Initialize with the first preset (NY weekly top 5) — the most common
+  // "live tracking" demo shape and our freshest per-operator feed.
+  const defaultCfg = PRESETS[0].config;
+  const [states, setStates] = useState(defaultCfg.states);
+  const [operators, setOperators] = useState(defaultCfg.operators);
   const [customOperator, setCustomOperator] = useState('');
-  const [channel, setChannel] = useState('any'); // any / online / retail / null
-  const [periodType, setPeriodType] = useState('monthly'); // monthly / weekly / any
-  const [from, setFrom] = useState('');
-  const [to, setTo] = useState('');
-  const [columns, setColumns] = useState(DEFAULT_COLUMNS);
-  const [sortCol, setSortCol] = useState('period_end');
-  const [sortDir, setSortDir] = useState('desc');
-  const [limit, setLimit] = useState(500);
+  const [channel, setChannel] = useState(defaultCfg.channel);
+  const [periodType, setPeriodType] = useState(defaultCfg.periodType);
+  const [from, setFrom] = useState(defaultCfg.from);
+  const [to, setTo] = useState(defaultCfg.to);
+  const [columns, setColumns] = useState(defaultCfg.columns);
+  const [sortCol, setSortCol] = useState(defaultCfg.sortCol);
+  const [sortDir, setSortDir] = useState(defaultCfg.sortDir);
+  const [limit, setLimit] = useState(defaultCfg.limit);
 
   const [showAdvancedCols, setShowAdvancedCols] = useState(false);
   const [outputFormat, setOutputFormat] = useState('url');
@@ -580,6 +589,11 @@ export default function ApiBuilder() {
                   >{opt.l}</button>
                 ))}
               </div>
+              <FreshnessHint
+                periodType={periodType}
+                states={states}
+                onSwitchToWeekly={() => setPeriodType('weekly')}
+              />
             </div>
           </div>
         </section>
@@ -718,6 +732,28 @@ export default function ApiBuilder() {
           <div>Read-only public API · <code>https://api.osbdata.com</code> · Contact: <a href="mailto:khimor@osbdata.com">khimor@osbdata.com</a></div>
         </footer>
       </div>
+    </div>
+  );
+}
+
+// Inline tip that nudges the user toward weekly when they've selected
+// monthly + a state that publishes weekly too. Per-operator monthly for
+// NY/WV/MT typically lags weekly by 4-6 weeks because the regulator
+// publishes detailed monthly reports later than the weekly summaries.
+function FreshnessHint({ periodType, states, onSwitchToWeekly }) {
+  if (periodType !== 'monthly') return null;
+  const overlap = (states || []).filter(s => WEEKLY_STATES.includes(s));
+  if (overlap.length === 0) return null;
+  const label = overlap.join(', ');
+  return (
+    <div className="ab-freshness-hint">
+      <span>
+        <b>{label}</b> publish{overlap.length === 1 ? 'es' : ''} weekly per-operator
+        data that's fresher than monthly (monthly typically lags 4–6 weeks).
+      </span>
+      <button type="button" className="ab-link" onClick={onSwitchToWeekly}>
+        Switch to Weekly →
+      </button>
     </div>
   );
 }

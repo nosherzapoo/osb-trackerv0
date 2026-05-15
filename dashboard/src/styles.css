@@ -3317,3 +3317,24 @@ select.ab-input {
   color: var(--text-secondary);
 }
 .ab-refresh-hint .ab-refresh-dot { background: var(--text-tertiary); }
+
+/* ─── API Builder freshness hint (per-state weekly nudge) ─ */
+.ab-freshness-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding: 7px 10px;
+  background: rgba(100, 136, 240, 0.10);
+  border: 1px solid rgba(100, 136, 240, 0.28);
+  border-radius: 5px;
+  font: 400 11.5px/1.4 var(--font-body);
+  color: var(--text-secondary);
+}
+.ab-freshness-hint b {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ab-freshness-hint .ab-link { font-size: 11.5px; }
