@@ -3362,3 +3362,90 @@ select.ab-input {
   font: 400 11.5px/1.4 var(--font-body);
   color: var(--text-tertiary);
 }
+
+/* ─── Login / signup modal additions ───────────────────── */
+.login-link-btn {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--accent-primary);
+  font: 500 12px/1 var(--font-body);
+  cursor: pointer;
+  text-decoration: none;
+}
+.login-link-btn:hover { text-decoration: underline; }
+
+.login-row-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+@media (max-width: 420px) {
+  .login-row-2 { grid-template-columns: 1fr; }
+}
+
+.login-success {
+  padding: 12px 14px;
+  background: rgba(64, 208, 176, 0.10);
+  border: 1px solid rgba(64, 208, 176, 0.35);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font: 400 13px/1.5 var(--font-body);
+}
+
+/* ─── Sidebar signup CTA (primary) + login (secondary) ─── */
+.sidebar-signup-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--accent-primary);
+  border: 0;
+  color: #fff;
+  font: 600 12.5px/1 var(--font-body);
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+.sidebar-signup-btn:hover { filter: brightness(1.1); }
+
+.sidebar-login-btn-small {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: var(--text-tertiary);
+  font: 400 11px/1.4 var(--font-body);
+  cursor: pointer;
+}
+.sidebar-login-btn-small:hover { color: var(--text-secondary); }
+.sidebar-login-btn-small svg { flex-shrink: 0; }
+
+/* ─── Preview banner — split CTAs ──────────────────────── */
+.preview-banner-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.preview-banner-cta-secondary {
+  padding: 6px 12px;
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle, #1a1a28);
+  border-radius: 6px;
+  font: 500 12px/1 var(--font-body);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.preview-banner-cta-secondary:hover {
+  background: var(--bg-hover);
+  border-color: var(--text-tertiary);
+}

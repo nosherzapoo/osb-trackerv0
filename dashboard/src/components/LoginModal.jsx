@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
+import SignupModal from './SignupModal';
 
 export default function LoginModal({ open, onClose }) {
   const { login } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [showSignup, setShowSignup] = useState(false);
   const emailRef = useRef(null);
 
   useEffect(() => {
@@ -13,6 +16,7 @@ export default function LoginModal({ open, onClose }) {
       setError('');
       setEmail('');
       setPassword('');
+      setShowSignup(false);
       setTimeout(() => emailRef.current?.focus(), 50);
     }
   }, [open]);
@@ -28,14 +32,27 @@ export default function LoginModal({ open, onClose }) {
 
   if (!open) return null;
 
-  const submit = (e) => {
+  if (showSignup) {
+    return (
+      <SignupModal
+        open={true}
+        onClose={onClose}
+        onSwitchToLogin={() => setShowSignup(false)}
+      />
+    );
+  }
+
+  const submit = async (e) => {
     e.preventDefault();
     setError('');
-    const ok = login(email, password);
-    if (!ok) {
-      setError('Invalid email or password.');
+    setSubmitting(true);
+    const result = await login(email, password);
+    if (!result.ok) {
+      setError(result.error || 'Invalid email or password.');
+      setSubmitting(false);
     }
-    // On success, AuthContext.login reloads the page.
+    // On success the AuthContext reloads the page — keep the spinner up
+    // until that happens to avoid flicker.
   };
 
   return (
@@ -46,7 +63,7 @@ export default function LoginModal({ open, onClose }) {
           <button className="login-close" onClick={onClose} aria-label="Close">×</button>
         </div>
         <p className="login-subtitle">
-          Enter the credentials provided by OSB Data to access the live data feed.
+          Sign in to your OSB Data account to access the live data feed.
         </p>
         <form onSubmit={submit} className="login-form">
           <label className="login-label">
@@ -59,6 +76,7 @@ export default function LoginModal({ open, onClose }) {
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@firm.com"
               required
+              disabled={submitting}
             />
           </label>
           <label className="login-label">
@@ -69,14 +87,23 @@ export default function LoginModal({ open, onClose }) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
+              disabled={submitting}
             />
           </label>
           {error && <div className="login-error">{error}</div>}
-          <button type="submit" className="login-submit">Sign in</button>
+          <button type="submit" className="login-submit" disabled={submitting}>
+            {submitting ? 'Signing in…' : 'Sign in'}
+          </button>
         </form>
         <div className="login-footer">
-          Don't have access yet? Contact{' '}
-          <a href="mailto:khimor@osbdata.com">khimor@osbdata.com</a>
+          Don't have an account?{' '}
+          <button
+            type="button"
+            className="login-link-btn"
+            onClick={() => setShowSignup(true)}
+          >
+            Create one
+          </button>
         </div>
       </div>
     </div>

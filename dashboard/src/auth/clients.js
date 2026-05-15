@@ -1,21 +1,5 @@
-// Demo credentials for the client-paywall gate.
-// This is intentionally frontend-only ("paywall theater") for the
-// first-client demo — real auth (Postgres role + JWT + RLS) will replace
-// this. To add a prospect: append { email, password, name } below.
-//
-// Anything not in this list cannot log in. Email matching is
-// case-insensitive; password is exact-match.
+// Authentication config. Authentication is now backed by Supabase; this file
+// only exposes the preview cutoff date that the data loader uses to gate
+// rows for unauthenticated visitors.
 
 export const PREVIEW_CUTOFF = '2026-01-31'; // logged-out users see <= this period_end
-
-export const CLIENTS = [
-  { email: 'khimor@osbdata.com', password: 'osbdata', name: 'Demo' },
-  { email: 'nosher-ali.khan@bernsteinsg.com', password: 'Abernstein@1', name: 'Bernstein SG' },
-];
-
-export function authenticate(email, password) {
-  if (!email || !password) return null;
-  const target = String(email).trim().toLowerCase();
-  const match = CLIENTS.find(c => c.email.toLowerCase() === target && c.password === password);
-  return match ? { email: match.email, name: match.name } : null;
-}

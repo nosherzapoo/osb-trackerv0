@@ -1,55 +1,118 @@
-import { createContext, useContext, useEffect, useState } from 'react';
-import { authenticate } from './clients';
+import { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import { supabase } from './supabaseClient';
 
-const STORAGE_KEY = 'osb_client_auth';
+// A separate flag we own — kept in sync with Supabase auth state. The data
+// loader needs a SYNC check (not async) to decide whether to apply the
+// preview cutoff, so we mirror Supabase's session presence into a key we
+// control. Cleared on sign-out, set on sign-in.
+const SYNC_FLAG_KEY = 'osb_client_authed';
 
 const AuthContext = createContext({
   user: null,
   isAuthenticated: false,
-  login: () => false,
-  logout: () => {},
+  loading: true,
+  login: async () => ({ ok: false, error: 'not ready' }),
+  signup: async () => ({ ok: false, error: 'not ready' }),
+  logout: async () => {},
 });
 
-function readStored() {
+function writeSyncFlag(present) {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+    if (present) localStorage.setItem(SYNC_FLAG_KEY, '1');
+    else localStorage.removeItem(SYNC_FLAG_KEY);
+  } catch {}
+}
+
+function userFromSession(session) {
+  if (!session?.user) return null;
+  const u = session.user;
+  return {
+    id: u.id,
+    email: u.email,
+    name: u.user_metadata?.name || u.user_metadata?.full_name || '',
+    company: u.user_metadata?.company || '',
+  };
 }
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(() => readStored());
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-  // Cross-tab sync — log out in one tab logs out the others.
   useEffect(() => {
-    const onStorage = (e) => {
-      if (e.key === STORAGE_KEY) setUser(readStored());
+    let mounted = true;
+
+    // Read existing session on mount.
+    supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) return;
+      const u = userFromSession(data.session);
+      setUser(u);
+      writeSyncFlag(!!u);
+      setLoading(false);
+    });
+
+    // React to logins, logouts, token refreshes — keeps multiple tabs in
+    // sync and handles the password-recovery / OAuth callback flows.
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      const u = userFromSession(session);
+      setUser(u);
+      writeSyncFlag(!!u);
+    });
+
+    return () => {
+      mounted = false;
+      sub?.subscription?.unsubscribe();
     };
-    window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
   }, []);
 
-  const login = (email, password) => {
-    const match = authenticate(email, password);
-    if (!match) return false;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(match));
-    setUser(match);
-    // Hard reload so cached data in loader.js refreshes against new auth state.
+  const login = useCallback(async (email, password) => {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    });
+    if (error) return { ok: false, error: error.message };
+    writeSyncFlag(!!data.session);
+    // Hard reload so loader.js refreshes its data cache against the new
+    // auth state. AuthContext's state will update on its own too, but the
+    // loader's _allData cache is module-scoped and survives re-renders.
     window.location.reload();
-    return true;
-  };
+    return { ok: true };
+  }, []);
 
-  const logout = () => {
-    localStorage.removeItem(STORAGE_KEY);
-    setUser(null);
+  const signup = useCallback(async (email, password, name, company) => {
+    const { data, error } = await supabase.auth.signUp({
+      email: email.trim(),
+      password,
+      options: {
+        data: { name: name || '', company: company || '' },
+      },
+    });
+    if (error) return { ok: false, error: error.message };
+    // If email confirmation is OFF in Supabase settings, signUp returns a
+    // session immediately and the user is logged in.
+    if (data.session) {
+      writeSyncFlag(true);
+      window.location.reload();
+      return { ok: true, signedIn: true };
+    }
+    // Otherwise the user needs to confirm via email first.
+    return { ok: true, signedIn: false };
+  }, []);
+
+  const logout = useCallback(async () => {
+    await supabase.auth.signOut();
+    writeSyncFlag(false);
     window.location.reload();
-  };
+  }, []);
 
   return (
-    <AuthContext.Provider value={{ user, isAuthenticated: !!user, login, logout }}>
+    <AuthContext.Provider value={{
+      user,
+      isAuthenticated: !!user,
+      loading,
+      login,
+      signup,
+      logout,
+    }}>
       {children}
     </AuthContext.Provider>
   );
@@ -59,7 +122,13 @@ export function useAuth() {
   return useContext(AuthContext);
 }
 
-// Sync read for loader.js (outside React).
+// Sync read for loader.js (outside React). Mirrors Supabase session presence
+// into our own localStorage flag so the data loader can decide whether to
+// apply the preview cutoff without awaiting Supabase.
 export function isAuthenticatedSync() {
-  return readStored() != null;
+  try {
+    return localStorage.getItem(SYNC_FLAG_KEY) === '1';
+  } catch {
+    return false;
+  }
 }

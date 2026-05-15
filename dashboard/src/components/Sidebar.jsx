@@ -1,7 +1,8 @@
-import { Globe, MapPin, Users, GitCompareArrows, BarChart3, Table2, BookOpen, Radio, LogIn, LogOut, Lock } from 'lucide-react';
+import { Globe, MapPin, Users, GitCompareArrows, BarChart3, Table2, BookOpen, Radio, LogIn, LogOut, Lock, UserPlus } from 'lucide-react';
 import { useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import LoginModal from './LoginModal';
+import SignupModal from './SignupModal';
 
 const NAV_ITEMS = [
   { id: 'feed', label: 'Feed', icon: Radio },
@@ -17,6 +18,7 @@ const NAV_ITEMS = [
 export default function Sidebar({ activeView, onNavigate, dataAsOf }) {
   const { user, isAuthenticated, logout } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
+  const [showSignup, setShowSignup] = useState(false);
 
   return (
     <nav className="sidebar" role="navigation" aria-label="Main navigation">
@@ -60,21 +62,35 @@ export default function Sidebar({ activeView, onNavigate, dataAsOf }) {
             <div className="sidebar-account-name">{user?.name || user?.email}</div>
           </div>
         ) : (
-          <button
-            className="sidebar-login-btn"
-            onClick={() => setShowLogin(true)}
-            aria-label="Sign in for live data"
-          >
-            <Lock size={14} aria-hidden="true" />
-            <span>Sign in for live data</span>
-            <LogIn size={14} aria-hidden="true" style={{ marginLeft: 'auto' }} />
-          </button>
+          <>
+            <button
+              className="sidebar-signup-btn"
+              onClick={() => setShowSignup(true)}
+              aria-label="Create a free account for live data"
+            >
+              <UserPlus size={14} aria-hidden="true" />
+              <span>Get free access</span>
+            </button>
+            <button
+              className="sidebar-login-btn-small"
+              onClick={() => setShowLogin(true)}
+              aria-label="Sign in"
+            >
+              <Lock size={12} aria-hidden="true" />
+              <span>Already have an account? Sign in</span>
+            </button>
+          </>
         )}
         {dataAsOf && (
           <div className="data-freshness">Data as of: {dataAsOf}</div>
         )}
       </div>
       <LoginModal open={showLogin} onClose={() => setShowLogin(false)} />
+      <SignupModal
+        open={showSignup}
+        onClose={() => setShowSignup(false)}
+        onSwitchToLogin={() => { setShowSignup(false); setShowLogin(true); }}
+      />
     </nav>
   );
 }

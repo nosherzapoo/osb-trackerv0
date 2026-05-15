@@ -3,6 +3,7 @@ import { Lock } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { PREVIEW_CUTOFF } from '../auth/clients';
 import LoginModal from './LoginModal';
+import SignupModal from './SignupModal';
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
@@ -14,6 +15,7 @@ function formatCutoff(iso) {
 export default function PreviewBanner() {
   const { isAuthenticated } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
+  const [showSignup, setShowSignup] = useState(false);
   if (isAuthenticated) return null;
   return (
     <>
@@ -22,11 +24,27 @@ export default function PreviewBanner() {
         <span>
           <strong>Preview mode</strong> — data through {formatCutoff(PREVIEW_CUTOFF)} only.
         </span>
-        <button className="preview-banner-cta" onClick={() => setShowLogin(true)}>
-          Sign in for live data
-        </button>
+        <div className="preview-banner-actions">
+          <button
+            className="preview-banner-cta-secondary"
+            onClick={() => setShowLogin(true)}
+          >
+            Sign in
+          </button>
+          <button
+            className="preview-banner-cta"
+            onClick={() => setShowSignup(true)}
+          >
+            Get free access
+          </button>
+        </div>
       </div>
       <LoginModal open={showLogin} onClose={() => setShowLogin(false)} />
+      <SignupModal
+        open={showSignup}
+        onClose={() => setShowSignup(false)}
+        onSwitchToLogin={() => { setShowSignup(false); setShowLogin(true); }}
+      />
     </>
   );
 }
