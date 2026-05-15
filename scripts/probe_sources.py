@@ -41,6 +41,23 @@ TIMEOUT_SEC = 20
 # caught quickly and long enough that we don't spam the same state.
 MIN_SCRAPE_GAP_MINUTES = 30
 
+# Per-state override for the min-scrape-gap. Keys are state codes; value is
+# minutes. States with consistently clean hash signals (audit showed ≤4
+# distinct hashes over 14 days) can use a much shorter gap so staggered
+# publishes (e.g. NY's per-operator weekly PDFs that drop 10-25 min apart)
+# all get caught within ~5 min. Default for any state not listed here is
+# MIN_SCRAPE_GAP_MINUTES.
+FAST_GAP_STATES = {
+    "NY": 5,   # weekly per-operator PDFs publish 10-25 min apart on Tuesdays
+    "KS": 5,
+    "NE": 5,
+    "IN": 5,
+    "CT": 5,
+    "ME": 5,
+    "CO": 5,
+    "NC": 5,
+}
+
 # ─── Per-state probe behaviour ──────────────────────────────────────────────
 #
 # probe_reliable=False means: still probe (so the ops dashboard can show
@@ -194,8 +211,9 @@ def _maybe_trigger_scrape(cur, state: str, current_probe: dict) -> str | None:
 
     if last_finished_at is not None:
         age = datetime.now(timezone.utc) - last_finished_at
-        if age < timedelta(minutes=MIN_SCRAPE_GAP_MINUTES):
-            return f"skip:recent_scrape ({int(age.total_seconds()/60)}m ago)"
+        gap_minutes = FAST_GAP_STATES.get(state, MIN_SCRAPE_GAP_MINUTES)
+        if age < timedelta(minutes=gap_minutes):
+            return f"skip:recent_scrape ({int(age.total_seconds()/60)}m ago, gap={gap_minutes}m)"
 
     if ops_jobs.is_scrape_running(cur):
         return "skip:scrape_running"
