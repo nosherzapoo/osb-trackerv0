@@ -19,8 +19,20 @@ const FREQUENCIES = [
 ];
 
 async function authHeaders() {
-  const { data } = await supabase.auth.getSession();
-  const token = data?.session?.access_token;
+  // getSession() reads the cached session and auto-refreshes via the
+  // refresh_token if the access_token is within the refresh-margin. But
+  // if a tab has been idle long enough, the access_token may already be
+  // expired AND the auto-refresh may not have run yet (the supabase-js
+  // refresh timer pauses on hidden tabs in some browsers). Explicitly
+  // refreshing first guarantees the token we send to the API is fresh
+  // — otherwise the API's Supabase round-trip will return 401.
+  let session = (await supabase.auth.getSession()).data?.session || null;
+  const expiresAt = session?.expires_at ? session.expires_at * 1000 : 0;
+  if (session && expiresAt && expiresAt - Date.now() < 60_000) {
+    const refreshed = await supabase.auth.refreshSession();
+    session = refreshed.data?.session || session;
+  }
+  const token = session?.access_token;
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 

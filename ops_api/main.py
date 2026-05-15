@@ -220,10 +220,24 @@ def notify_signup(body: SignupNotifyRequest, request: _Request):
 import urllib.request as _urlreq
 import urllib.error as _urlerr
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://auth.osbdata.com")
+# NOTE: We deliberately use SUPABASE_AUTH_URL / SUPABASE_AUTH_KEY here
+# instead of the generic SUPABASE_URL / SUPABASE_KEY. The legacy env vars
+# point at an old Supabase project (yjrfmlcfvogsfodgmcfw, now paused) that
+# some scripts still reference for unrelated data loads. Tokens minted by
+# the live auth project (hljwzntqywzepvwouyxr, exposed via
+# https://auth.osbdata.com) cannot be verified against the old project —
+# Supabase responds 401 because the JWT signing key doesn't match. Using
+# dedicated names decouples JWT verification from those legacy scripts.
+SUPABASE_URL = os.environ.get(
+    "SUPABASE_AUTH_URL",
+    os.environ.get("SUPABASE_AUTH_VERIFY_URL", "https://auth.osbdata.com"),
+)
 SUPABASE_ANON_KEY = os.environ.get(
-    "SUPABASE_PUBLISHABLE_KEY",
-    "sb_publishable_RSlc6gLlCOAtuGTHLWsMwA_dOb9fHWR",
+    "SUPABASE_AUTH_KEY",
+    os.environ.get(
+        "SUPABASE_PUBLISHABLE_KEY",
+        "sb_publishable_RSlc6gLlCOAtuGTHLWsMwA_dOb9fHWR",
+    ),
 )
 _VALID_FREQUENCIES = {"immediate", "daily", "weekly"}
 
