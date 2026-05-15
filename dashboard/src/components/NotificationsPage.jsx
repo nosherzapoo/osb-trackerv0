@@ -13,7 +13,7 @@ const STATE_CODES = [
 ];
 
 const FREQUENCIES = [
-  { key: 'immediate', title: 'Per-state immediate', sub: 'One email per state, within an hour of regulator publish.' },
+  { key: 'immediate', title: 'Per-state immediate', sub: 'One email per state, typically within ~5 minutes of the regulator publishing.' },
   { key: 'daily',     title: 'Daily digest',        sub: 'A single email at 8 a.m. ET summarising every state that updated yesterday.' },
   { key: 'weekly',    title: 'Weekly digest',       sub: 'A single email Monday 8 a.m. ET summarising the past week.' },
 ];
