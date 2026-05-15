@@ -76,7 +76,7 @@ export default function LoginModal({ open, onClose }) {
         </form>
         <div className="login-footer">
           Don't have access yet? Contact{' '}
-          <a href="mailto:nosher@osbdata.com">nosher@osbdata.com</a>
+          <a href="mailto:khimor@osbdata.com">khimor@osbdata.com</a>
         </div>
       </div>
     </div>
