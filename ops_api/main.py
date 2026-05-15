@@ -36,10 +36,15 @@ from scrapers.config import STATE_REGISTRY  # noqa: E402
 
 app = FastAPI(title="OSB Ops API", version="0.1.0", docs_url="/docs", redoc_url=None)
 
-# CORS — same-origin in production, but allow localhost for dev.
+# CORS — same-origin in production, but allow localhost for dev. After the
+# osbdata.com cutover the dashboard lives at both osbdata.com and
+# app.osbdata.com so both are permitted by default.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.environ.get("OPS_CORS_ORIGINS", "https://app.osbdata.com,http://localhost:5173").split(","),
+    allow_origins=os.environ.get(
+        "OPS_CORS_ORIGINS",
+        "https://osbdata.com,https://www.osbdata.com,https://app.osbdata.com,http://localhost:5173"
+    ).split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -72,6 +77,114 @@ def login(body: LoginRequest):
 @app.get("/auth/me")
 def me(user: str = Depends(require_user)):
     return {"username": user}
+
+
+# =============================================================================
+# Public signup notification — called by the dashboard's signup flow AFTER a
+# successful Supabase signup. Sends an email to ops so we can track interest
+# and follow up. Public (no JWT required) because it fires before the client
+# has any token; rate-limited in-memory by IP to keep abuse contained.
+# =============================================================================
+
+import re as _re
+import smtplib as _smtplib
+import time as _time
+from collections import deque as _deque
+from email.mime.multipart import MIMEMultipart as _MIMEMultipart
+from email.mime.text import MIMEText as _MIMEText
+from fastapi import Request as _Request
+
+
+class SignupNotifyRequest(BaseModel):
+    email: str
+    name: str | None = None
+    company: str | None = None
+
+
+_EMAIL_RE = _re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_NOTIFY_TO = "khimor@osbdata.com"
+_RATE_LIMIT_PER_HOUR = 30  # per source IP
+_rate_log: dict[str, _deque] = {}
+
+
+def _rate_limited(ip: str) -> bool:
+    now = _time.time()
+    window = 3600
+    q = _rate_log.setdefault(ip, _deque())
+    while q and now - q[0] > window:
+        q.popleft()
+    if len(q) >= _RATE_LIMIT_PER_HOUR:
+        return True
+    q.append(now)
+    return False
+
+
+def _send_signup_email(payload: SignupNotifyRequest, ip: str) -> bool:
+    username = os.environ.get("EMAIL_USERNAME")
+    password = os.environ.get("EMAIL_PASSWORD")
+    if not username or not password:
+        # SMTP unconfigured — silently skip rather than fail the signup flow.
+        return False
+
+    subject = f"OSB Tracker — new signup: {payload.email}"
+    text = (
+        f"New OSB Tracker signup\n\n"
+        f"Email:   {payload.email}\n"
+        f"Name:    {payload.name or '(not provided)'}\n"
+        f"Firm:    {payload.company or '(not provided)'}\n"
+        f"IP:      {ip}\n"
+        f"Time:    {datetime.now(timezone.utc).isoformat()}\n\n"
+        f"Source:  https://osbdata.com  (Supabase Auth)\n"
+    )
+    html = f"""\
+<html><body style="font-family: -apple-system, sans-serif; color: #222;">
+  <h2 style="margin:0 0 8px;">New OSB Tracker signup</h2>
+  <table cellpadding="6" style="border-collapse: collapse; font-size: 14px;">
+    <tr><td style="color:#888;">Email</td><td><b>{payload.email}</b></td></tr>
+    <tr><td style="color:#888;">Name</td><td>{payload.name or '<i>(not provided)</i>'}</td></tr>
+    <tr><td style="color:#888;">Firm</td><td>{payload.company or '<i>(not provided)</i>'}</td></tr>
+    <tr><td style="color:#888;">IP</td><td>{ip}</td></tr>
+    <tr><td style="color:#888;">Time</td><td>{datetime.now(timezone.utc).isoformat()}</td></tr>
+  </table>
+  <p style="color:#666; font-size:12px; margin-top:16px;">
+    Auto-fired by the dashboard signup flow on Supabase Auth success.
+    Manage users in the Supabase Auth dashboard.
+  </p>
+</body></html>"""
+
+    msg = _MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = f"OSB Tracker <{username}>"
+    msg["To"] = _NOTIFY_TO
+    msg["Reply-To"] = payload.email
+    msg.attach(_MIMEText(text, "plain"))
+    msg.attach(_MIMEText(html, "html"))
+
+    try:
+        with _smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(username, password)
+            server.sendmail(username, _NOTIFY_TO, msg.as_string())
+        return True
+    except Exception:
+        return False
+
+
+@app.post("/auth/notify-signup")
+def notify_signup(body: SignupNotifyRequest, request: _Request):
+    """Public endpoint — dashboard calls this after a successful Supabase
+    signup so we get an email about the new user. Best-effort: errors are
+    swallowed so a transient SMTP problem can't break the signup UX.
+    """
+    if not body.email or not _EMAIL_RE.match(body.email):
+        raise HTTPException(status_code=400, detail="invalid email")
+
+    ip = request.client.host if request.client else "unknown"
+    if _rate_limited(ip):
+        raise HTTPException(status_code=429, detail="too many requests")
+
+    sent = _send_signup_email(body, ip)
+    return {"ok": True, "emailed": sent}
 
 
 # =============================================================================

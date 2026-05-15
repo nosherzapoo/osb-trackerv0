@@ -87,6 +87,22 @@ export function AuthProvider({ children }) {
       },
     });
     if (error) return { ok: false, error: error.message };
+
+    // Fire-and-forget notification to ops (lets us track new signups and
+    // follow up). Doesn't block the user's experience — any error here is
+    // silently swallowed since the actual signup succeeded.
+    try {
+      fetch('https://api.osbdata.com/ops/auth/notify-signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: email.trim(),
+          name: name || '',
+          company: company || '',
+        }),
+      }).catch(() => {});
+    } catch {}
+
     // If email confirmation is OFF in Supabase settings, signUp returns a
     // session immediately and the user is logged in.
     if (data.session) {
