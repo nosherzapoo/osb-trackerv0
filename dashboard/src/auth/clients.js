@@ -10,8 +10,7 @@ export const PREVIEW_CUTOFF = '2026-01-31'; // logged-out users see <= this peri
 
 export const CLIENTS = [
   { email: 'khimor@osbdata.com', password: 'osbdata', name: 'Demo' },
-  // Add prospects here before the demo. Example:
-  // { email: 'acme@osbdata.com', password: 'replace-me', name: 'Acme Capital' },
+  { email: 'nosher-ali.khan@bernsteinsg.com', password: 'Abernstein@1', name: 'Bernstein SG' },
 ];
 
 export function authenticate(email, password) {
