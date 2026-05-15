@@ -10,7 +10,7 @@ export const PREVIEW_CUTOFF = '2026-01-31'; // logged-out users see <= this peri
 
 export const CLIENTS = [
   // Demo runner / Nosher
-  { email: 'demo@osbdata.com', password: 'osbdata-demo-2026', name: 'Demo' },
+  { email: 'demo@osbdata.com', password: 'osbdata', name: 'Demo' },
   // Add prospects here before the demo. Example:
   // { email: 'acme@osbdata.com', password: 'replace-me', name: 'Acme Capital' },
 ];
