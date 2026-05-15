@@ -180,7 +180,7 @@ function makeWalkthroughs(url) {
     {
       key: 'excel-win',
       label: 'Excel (Windows)',
-      blurb: 'Power Query refreshes the table on demand — the typical analyst workflow. New rows from the regulator (e.g. NY\'s weekly publish) appear automatically the next time you Refresh.',
+      blurb: 'Power Query refreshes the table on demand.',
       steps: [
         { text: 'Open Excel. Create a blank workbook.' },
         { text: 'Click Get Data → From Other Sources → From Web.', menu: 'Data → Get Data → From Other Sources → From Web' },
@@ -729,17 +729,14 @@ function RefreshFriendly({ to, sortCol, sortDir }) {
   const sortedLatestFirst = sortCol === 'period_end' && sortDir === 'desc';
   const friendly = !hasEndDate && sortedLatestFirst;
 
-  let msg, cls;
-  if (friendly) {
-    msg = 'Refresh-friendly — new periods will appear at the top of your table on next refresh.';
-    cls = 'ab-refresh-ok';
-  } else if (hasEndDate) {
-    msg = 'End date is set — this URL is frozen to that date. New periods after it will NOT appear on refresh.';
-    cls = 'ab-refresh-warn';
-  } else {
-    msg = 'Sort by period_end desc to make sure newly published periods land at the top after a refresh.';
-    cls = 'ab-refresh-hint';
-  }
+  // Only surface the banner when there's something to flag — keep the UI
+  // calm when the URL is already refresh-friendly.
+  if (friendly) return null;
+
+  const cls = hasEndDate ? 'ab-refresh-warn' : 'ab-refresh-hint';
+  const msg = hasEndDate
+    ? 'End date is set — this URL is frozen to that date. New periods after it will NOT appear on refresh.'
+    : 'Sort by period_end desc to make sure newly published periods land at the top after a refresh.';
 
   return (
     <div className={`ab-refresh-banner ${cls}`}>
