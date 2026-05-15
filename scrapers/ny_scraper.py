@@ -90,9 +90,12 @@ class NYScraper(BaseStateScraper):
         self._init_browser()
         save_path = self.raw_dir / filename
 
-        # NY publishes "live" PDFs at fixed URLs whose contents are appended
-        # weekly. Use the base helper which expires cached files after 12h.
-        if not self._should_redownload(save_path):
+        # NY publishes weekly per-operator PDFs at STABLE URLs (no period in
+        # the path). The default 12h cache meant we'd keep returning the stale
+        # May-3 file for up to 12h after NY published May-10, so a tier1 run
+        # (every 6h) could miss the publish for two cycles. 1h is short enough
+        # that the next tier1 run after a publish picks up the fresh file.
+        if not self._should_redownload(save_path, max_age_hours=1):
             self.logger.info(f"  Already downloaded (recent): {filename}")
             return save_path
 
