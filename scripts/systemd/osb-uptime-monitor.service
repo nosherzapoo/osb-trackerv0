@@ -1,0 +1,13 @@
+[Unit]
+Description=OSB tracker — uptime monitor (probes public endpoints, emails on PASS/FAIL transitions)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/osb-trackerv0
+EnvironmentFile=-/srv/osb-trackerv0/.env
+ExecStart=/srv/osb-trackerv0/.venv/bin/python /srv/osb-trackerv0/scripts/monitor_uptime.py --once
+TimeoutStartSec=2min
+MemoryMax=64M
+StandardOutput=journal
+StandardError=journal
