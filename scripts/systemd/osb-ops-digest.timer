@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily ops-health digest — fires at 13:00 UTC (9am ET), after stale-monitor finishes
+
+[Timer]
+OnCalendar=*-*-* 13:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

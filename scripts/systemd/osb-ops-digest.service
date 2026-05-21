@@ -1,0 +1,12 @@
+[Unit]
+Description=OSB tracker — daily ops-health digest email (service/pipeline/freshness/process/anomalies/probes)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/osb-trackerv0
+EnvironmentFile=-/srv/osb-trackerv0/.env
+ExecStart=/srv/osb-trackerv0/.venv/bin/python /srv/osb-trackerv0/scripts/send_ops_digest.py --send-now
+TimeoutStartSec=5min
+StandardOutput=journal
+StandardError=journal
