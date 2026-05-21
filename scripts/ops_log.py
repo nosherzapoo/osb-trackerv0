@@ -169,7 +169,31 @@ def cmd_finish(args):
         sidecar_states = [r.get("state") for r in sidecars if r.get("state")]
         latest_hashes = _latest_source_hashes(cur, sidecar_states)
 
+        # Look up the parent run's triggered_by so we can propagate it into
+        # each per-state row's metadata. Downstream queries (ops digest,
+        # probe-coverage metrics) filter on metadata->>'trigger' so the
+        # source of the scrape must be visible at the state-row level, not
+        # just on the run.
+        cur.execute(
+            "SELECT triggered_by FROM ops.scrape_runs WHERE id = %s",
+            (args.run_id,),
+        )
+        row = cur.fetchone()
+        triggered_by = (row[0] if row else None) or ""
+        # "probe:NY" / "probe:PA" all map to the canonical "probe" tag.
+        if triggered_by.startswith("probe"):
+            trigger_tag = "probe"
+        elif triggered_by.startswith("manual") or triggered_by.startswith("ops:"):
+            trigger_tag = "manual"
+        elif triggered_by in ("systemd", "") or triggered_by.startswith("systemd"):
+            trigger_tag = "cron"
+        else:
+            trigger_tag = triggered_by
+
         for r in sidecars:
+            md = dict(r.get("metadata") or {})
+            md.setdefault("trigger", trigger_tag)
+            md.setdefault("triggered_by", triggered_by or "systemd")
             cur.execute(
                 """
                 INSERT INTO ops.scrape_state_results
@@ -190,7 +214,7 @@ def cmd_finish(args):
                     r.get("period_type"),
                     r.get("elapsed_sec"),
                     r.get("error_text"),
-                    json.dumps(r.get("metadata") or {}),
+                    json.dumps(md),
                     latest_hashes.get(r.get("state")),
                 ),
             )

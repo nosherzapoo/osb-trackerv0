@@ -18,17 +18,73 @@ import psycopg
 REPO = Path("/srv/osb-trackerv0")
 PG_PASS_FILE = Path("/root/.osb_pg_pass")
 
+# Any scrape job still marked pending/running after this many minutes is
+# treated as stale and reaped on the next is_scrape_running() check. Real
+# scrapes finish well under this (slowest single-state run we've seen is
+# ~25 min). 120 min gives a generous safety margin while ensuring a hung
+# systemd-killed wrapper (which can't update its own ops.jobs row) doesn't
+# block the probe trigger pipeline indefinitely. The May 2026 incident had
+# a single stuck row block ~3 days of probe-triggered scrapes.
+STALE_JOB_MINUTES = 120
+
 
 def get_conn():
     pw = PG_PASS_FILE.read_text().strip()
     return psycopg.connect(f"postgres://osb_writer:{pw}@127.0.0.1:5432/osb_data")
 
 
+def _reap_stale_jobs(cursor) -> int:
+    """Mark as failed any pending/running scrape job whose started_at is
+    older than STALE_JOB_MINUTES AND whose systemd unit is no longer active.
+    Returns the count reaped. Safe to call on every is_scrape_running() —
+    the query is index-backed by jobs_status_idx and the systemctl check
+    only runs on the (rare) candidate rows.
+    """
+    cursor.execute(
+        f"""
+        SELECT id, systemd_unit
+          FROM ops.jobs
+         WHERE status IN ('pending','running')
+           AND kind IN ('scrape_state','scrape_tier','backfill_state')
+           AND COALESCE(started_at, created_at) < now() - interval '{STALE_JOB_MINUTES} minutes'
+        """
+    )
+    candidates = cursor.fetchall()
+    reaped = 0
+    for job_id, unit in candidates:
+        unit_active = False
+        if unit:
+            try:
+                r = subprocess.run(
+                    ["systemctl", "is-active", unit],
+                    capture_output=True, text=True, timeout=5,
+                )
+                unit_active = r.stdout.strip() in ("active", "activating")
+            except Exception:
+                unit_active = False
+        if unit_active:
+            continue
+        cursor.execute(
+            "UPDATE ops.jobs SET status='failed', finished_at=now(), "
+            "error_text=COALESCE(error_text,'') || ' [reaped: stale row, "
+            "systemd unit not active]' WHERE id = %s",
+            (job_id,),
+        )
+        reaped += 1
+    return reaped
+
+
 def is_scrape_running(cur=None) -> bool:
     """True if any scrape job is in pending/running OR a tier service is
     currently active. Coarse but safe — prevents overlapping scrapers
-    stomping on the same CSV."""
+    stomping on the same CSV.
+
+    First reaps stale rows (started_at > STALE_JOB_MINUTES ago AND systemd
+    unit gone) so a single hung/killed wrapper doesn't permanently block
+    the probe-trigger pipeline.
+    """
     def _check(cursor):
+        _reap_stale_jobs(cursor)
         cursor.execute(
             "SELECT 1 FROM ops.jobs WHERE status IN ('pending','running') "
             "AND kind IN ('scrape_state','scrape_tier','backfill_state') LIMIT 1"
@@ -36,11 +92,19 @@ def is_scrape_running(cur=None) -> bool:
         return cursor.fetchone() is not None
 
     if cur is not None:
+        # Caller owns the txn; commit so the reap UPDATE is visible to other
+        # connections (probe_sources commits per state too).
         if _check(cur):
             return True
+        try:
+            cur.connection.commit()
+        except Exception:
+            pass
     else:
         with get_conn() as conn, conn.cursor() as c:
-            if _check(c):
+            running = _check(c)
+            conn.commit()
+            if running:
                 return True
 
     try:
