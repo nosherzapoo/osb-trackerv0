@@ -7,7 +7,7 @@ export default function StateGrid() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [filter, setFilter] = useState('all');
-  const [sort, setSort] = useState('tier');
+  const [sort, setSort] = useState('freshness');
   const [search, setSearch] = useState('');
   const [activeJobId, setActiveJobId] = useState(null);
   const [actionError, setActionError] = useState(null);
@@ -57,6 +57,16 @@ export default function StateGrid() {
     return { handle: sumH, ggr: sumG, hold: sumH > 0 ? sumG / sumH : null };
   }, [data]);
 
+  const freshnessTallies = useMemo(() => {
+    const t = { fresh: 0, at_risk: 0, stale: 0 };
+    if (!data?.states) return t;
+    for (const s of data.states) {
+      const k = s.freshness_status;
+      if (k === 'fresh' || k === 'at_risk' || k === 'stale') t[k] += 1;
+    }
+    return t;
+  }, [data]);
+
   const visibleStates = useMemo(() => {
     if (!data?.states) return [];
     let arr = data.states.slice();
@@ -69,8 +79,18 @@ export default function StateGrid() {
     }
     if (filter === 'failed') arr = arr.filter((s) => s.last_run?.status === 'failed' || s.last_run?.status === 'timeout');
     if (filter === 'anomalies') arr = arr.filter((s) => (s.open_anomalies?.high || 0) + (s.open_anomalies?.medium || 0) > 0);
-    if (filter === 'stale') arr = arr.filter((s) => isStale(s));
-    if (sort === 'tier') {
+    if (filter === 'stale') arr = arr.filter((s) => s.freshness_status === 'stale' || s.freshness_status === 'at_risk');
+    if (sort === 'freshness') {
+      // stale first, then at_risk, then fresh; within bucket sort by
+      // days_stale descending so the most-overdue row is at the top.
+      const rank = { stale: 0, at_risk: 1, fresh: 2 };
+      arr.sort((a, b) => {
+        const ra = rank[a.freshness_status] ?? 3;
+        const rb = rank[b.freshness_status] ?? 3;
+        if (ra !== rb) return ra - rb;
+        return (b.days_stale ?? -1) - (a.days_stale ?? -1);
+      });
+    } else if (sort === 'tier') {
       arr.sort((a, b) => (a.tier || 99) - (b.tier || 99) || a.state_code.localeCompare(b.state_code));
     } else if (sort === 'yoy') {
       arr.sort((a, b) =>
@@ -95,6 +115,13 @@ export default function StateGrid() {
           <div className="ops-total"><span className="ops-muted">Total GGR</span> <strong>{fmtDollars(totals?.ggr)}</strong></div>
           <div className="ops-total"><span className="ops-muted">Avg Hold</span> <strong>{fmtPct(totals?.hold)}</strong></div>
           <div className="ops-total ops-muted ops-small">{visibleStates.length} of {data.states.length} states</div>
+          <div className="ops-freshness-chip" title="Data freshness across all tracked states">
+            <span className="ops-fresh-seg seg-stale">{freshnessTallies.stale} stale</span>
+            <span className="ops-fresh-sep">,</span>
+            <span className="ops-fresh-seg seg-at-risk">{freshnessTallies.at_risk} at risk</span>
+            <span className="ops-fresh-sep">,</span>
+            <span className="ops-fresh-seg seg-fresh">{freshnessTallies.fresh} fresh</span>
+          </div>
         </div>
         <div className="ops-grid-controls">
           <input
@@ -110,6 +137,7 @@ export default function StateGrid() {
             <option value="stale">Stale data</option>
           </select>
           <select className="ops-input" value={sort} onChange={(e) => setSort(e.target.value)}>
+            <option value="freshness">Freshness</option>
             <option value="tier">Tier</option>
             <option value="yoy">|YoY|</option>
             <option value="updated">Last updated</option>
@@ -162,6 +190,8 @@ function StateCard({ state, onScrape, onBackfill, onToggleDisabled }) {
           {lastRun.elapsed_sec != null && ` · ${fmtDuration(lastRun.elapsed_sec)}`}
         </span>
       </div>
+
+      <FreshnessRow state={state} />
 
       <div className="ops-state-financials">
         <div className="ops-fin-period">
@@ -233,14 +263,32 @@ function StatusDot({ status }) {
   return <span className="ops-status-dot" style={{ background: color }} />;
 }
 
-function isStale(state) {
-  // Flag a state as stale if its latest period is older than the start of the
-  // previous calendar month (rough heuristic — actual cycle varies by state).
-  const period = state.financials?.period;
-  if (!period) return false;
-  const d = new Date(String(period).slice(0, 10) + 'T00:00:00');
-  const cutoff = new Date();
-  cutoff.setUTCMonth(cutoff.getUTCMonth() - 2);
-  cutoff.setUTCDate(1);
-  return d < cutoff;
+function FreshnessRow({ state }) {
+  const status = state.freshness_status || 'fresh';
+  const days = state.days_stale;
+  const threshold = state.stale_threshold_days;
+  const cls =
+    status === 'fresh'   ? 'fresh-fresh' :
+    status === 'at_risk' ? 'fresh-atrisk' :
+                           'fresh-stale';
+  const label =
+    status === 'fresh'   ? 'fresh' :
+    status === 'at_risk' ? 'at risk' :
+                           'stale';
+  const dot =
+    status === 'fresh'   ? '\u{1F7E2}' :
+    status === 'at_risk' ? '\u{1F7E1}' :
+                           '\u{1F534}';
+  const sub = days == null
+    ? `no data (threshold ${threshold}d)`
+    : `${days} days stale (threshold ${threshold})`;
+  return (
+    <div className="ops-fresh-row">
+      <span className={`ops-fresh-pill ${cls}`} title={`Data freshness: ${label}`}>
+        <span className="ops-fresh-dot">{dot}</span>
+        <span className="ops-fresh-label">{label}</span>
+      </span>
+      <span className="ops-muted ops-small ops-fresh-sub">{sub}</span>
+    </div>
+  );
 }

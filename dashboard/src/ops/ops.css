@@ -332,6 +332,45 @@
   word-break: break-word;
 }
 
+/* ── Freshness ───────────────────────────────────────── */
+.ops-fresh-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ops-fresh-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font: 500 11px/1.4 var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ops-fresh-pill.fresh-fresh  { background: var(--positive-bg); color: var(--positive); }
+.ops-fresh-pill.fresh-atrisk { background: var(--info-bg);     color: var(--warning); }
+.ops-fresh-pill.fresh-stale  { background: var(--negative-bg); color: var(--negative); }
+.ops-fresh-dot   { font-size: 9px; line-height: 1; }
+.ops-fresh-label { font-weight: 600; }
+.ops-fresh-sub   { font: 400 11px/1.2 var(--font-mono); }
+
+.ops-freshness-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 4px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  font: 500 12px/1.2 var(--font-mono);
+}
+.ops-freshness-chip .ops-fresh-seg.seg-fresh   { color: var(--positive); }
+.ops-freshness-chip .ops-fresh-seg.seg-at-risk { color: var(--warning); }
+.ops-freshness-chip .ops-fresh-seg.seg-stale   { color: var(--negative); }
+.ops-freshness-chip .ops-fresh-sep             { color: var(--text-tertiary); }
+
 /* ── Login ────────────────────────────────────────────── */
 .ops-login-wrap {
   display: flex;

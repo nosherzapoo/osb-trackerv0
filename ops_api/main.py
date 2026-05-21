@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from . import db
 from .auth import authenticate, issue_token, require_user
+from .freshness import freshness_for
 
 # -----------------------------------------------------------------------------
 # State registry — load once at startup; cheap and tier/name don't change
@@ -488,12 +489,19 @@ def list_states(user: str = Depends(require_user)):
     # Pre-fetch financials for all states' latest period.
     financials_by_state = _fetch_financials_for_all()
 
+    # Pre-fetch the absolute latest period_end per state (across any
+    # period_type) so freshness reflects weekly states correctly even when
+    # their financials row is sourced from monthly aggregates only.
+    latest_period_by_state = _fetch_latest_period_for_all()
+
     out = []
     for code, meta in STATE_REGISTRY.items():
         last = by_state.get(code) or {}
         an = anomalies_by_state.get(code, {"high": 0, "medium": 0, "low": 0})
         ovr = overrides.get(code) or {}
         fin = financials_by_state.get(code) or {}
+        latest_period = latest_period_by_state.get(code)
+        freshness = freshness_for(code, meta.get("frequency"), latest_period)
         out.append({
             "state_code": code,
             "name": meta.get("name", code),
@@ -501,6 +509,9 @@ def list_states(user: str = Depends(require_user)):
             "frequency": meta.get("frequency"),
             "disabled": bool(ovr.get("disabled", False)),
             "disabled_reason": ovr.get("reason"),
+            "days_stale": freshness["days_stale"],
+            "stale_threshold_days": freshness["stale_threshold_days"],
+            "freshness_status": freshness["freshness_status"],
             "last_run": {
                 "run_id": last.get("run_id"),
                 "finished_at": last.get("finished_at"),
@@ -599,6 +610,22 @@ def _fetch_financials_for_all() -> dict:
                 if (handle is not None and _f(r.get("handle_pm")) and _f(r.get("handle_pm")) > 0) else None,
         }
     return out
+
+
+def _fetch_latest_period_for_all() -> dict:
+    """Return {state_code: latest_period_end} across all period_types.
+
+    Used by the freshness column so weekly states surface their newest
+    weekly row, not their newest monthly aggregate (which can lag).
+    """
+    rows = db.query_all(
+        """
+        SELECT state_code, MAX(period_end) AS latest
+          FROM api.monthly_data
+         GROUP BY state_code
+        """
+    )
+    return {r["state_code"]: r["latest"] for r in rows if r.get("latest")}
 
 
 def _f(v) -> float | None:
