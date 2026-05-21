@@ -115,7 +115,7 @@ def insert_anomalies(conn, stale_rows: list[dict]) -> int:
                 """
                 SELECT 1 FROM ops.anomalies
                 WHERE state = %s AND check_name = 'stale_state'
-                  AND created_at > now() - interval '20 hours'
+                  AND detected_at > now() - interval '20 hours'
                 LIMIT 1
                 """,
                 (r["state"],),
@@ -126,17 +126,23 @@ def insert_anomalies(conn, stale_rows: list[dict]) -> int:
                 f"{r['name']} latest data is {r['days_stale']} days old "
                 f"(threshold {r['threshold']}d for {r['frequency']} cadence)."
             )
+            import json as _json
+            details_json = _json.dumps({
+                "days_stale": r["days_stale"],
+                "threshold":  r["threshold"],
+                "frequency":  r["frequency"],
+            })
             cur.execute(
                 """
                 INSERT INTO ops.anomalies
-                    (state, check_name, severity, message, period, details, created_at)
-                VALUES (%s, 'stale_state', 'high', %s, %s, %s, now())
+                    (state, check_name, severity, message, period, details, detected_at)
+                VALUES (%s, 'stale_state', 'high', %s, %s, %s::jsonb, now())
                 """,
                 (
                     r["state"],
                     msg,
-                    str(r["latest"] or ""),
-                    f"days_stale={r['days_stale']} threshold={r['threshold']} freq={r['frequency']}",
+                    r["latest"],
+                    details_json,
                 ),
             )
             n += 1
