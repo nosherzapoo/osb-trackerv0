@@ -27,6 +27,17 @@ PG_PASS_FILE = Path("/root/.osb_pg_pass")
 # a single stuck row block ~3 days of probe-triggered scrapes.
 STALE_JOB_MINUTES = 120
 
+# Hard cap (belt-and-suspenders): even if systemd still reports the unit
+# active (process wedged but not exited, or systemd_unit field empty/wrong),
+# any row stuck in pending/running for more than this many hours is force-
+# reaped. 6h was chosen because it's well past every legitimate run we have:
+# the weekly full backfill is ~4h, tier1 is ~6 min, and single-state scrapes
+# are ~3-7 min. A "running" row older than 6h is genuinely dead, and leaving
+# it would block every probe-triggered scrape across all reliable states
+# indefinitely (24h incident on 2026-05-21 traced to a stuck probe:KY row
+# that the soft reaper refused to touch because systemctl still said active).
+HARD_REAP_HOURS = 6
+
 
 def get_conn():
     pw = PG_PASS_FILE.read_text().strip()
@@ -71,6 +82,26 @@ def _reap_stale_jobs(cursor) -> int:
             (job_id,),
         )
         reaped += 1
+
+    # Hard reap: force-fail anything older than HARD_REAP_HOURS regardless of
+    # what systemd thinks. This catches: (a) processes wedged but not exited
+    # so the unit still reports active, (b) rows with empty/wrong
+    # systemd_unit, (c) systemctl itself failing/timing out. Runs after the
+    # soft reap so rows the soft reap could handle get the more specific
+    # "systemd unit not active" label first.
+    cursor.execute(
+        f"""
+        UPDATE ops.jobs
+           SET status='failed',
+               finished_at=now(),
+               error_text=COALESCE(error_text,'') ||
+                   ' [reaped: hard {HARD_REAP_HOURS}h cap - job exceeded max runtime]'
+         WHERE status IN ('pending','running')
+           AND kind IN ('scrape_state','scrape_tier','backfill_state')
+           AND COALESCE(started_at, created_at) < now() - interval '{HARD_REAP_HOURS} hours'
+        """
+    )
+    reaped += cursor.rowcount or 0
     return reaped
 
 
