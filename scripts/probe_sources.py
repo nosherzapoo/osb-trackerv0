@@ -248,6 +248,42 @@ STATE_PROBE_CONFIGS: dict[str, dict] = {
         "headers": {"User-Agent": BROWSER_UA, "Accept-Encoding": "gzip, deflate, br"},
     },
 
+    # NY: the gaming.ny.gov/revenue-reports landing page does NOT change when
+    # a per-operator weekly PDF is republished (caught us out on 2026-05-14
+    # when DraftKings et al. uploaded the May 17 week silently). Instead,
+    # probe each operator's stable slug URL — gaming.ny.gov 301-redirects
+    # them to versioned /system/files/documents/.../*.pdf and the redirect
+    # target's Last-Modified + ETag change on every upload.
+    #
+    # Slug notes (from scrapers/ny_scraper.py and live HEAD checks on
+    # 2026-05-14):
+    #   - theScore Bet  → /wynn-interactive-weekly-report-pdf
+    #                     (then 301s through /thescore-bet-weekly-report-pdf
+    #                     to the versioned file — both redirects followed)
+    #   - Rush Street   → /rush-street-interactive-weekly-report-pdf
+    #                     (NOT /rivers-casino-and-resort-weekly-pdf — 404)
+    #   - ESPN BET      → covered by /wynn-interactive- (same Wynn slot;
+    #                     /espnbet-weekly-report-pdf is 404)
+    #   - Resorts World → included (separate active operator per ny_scraper)
+    # Plus the statewide monthly XLSX for the monthly aggregate signal.
+    "NY": {
+        "urls": [
+            "https://gaming.ny.gov/draftkings-sport-book-weekly-report-pdf",
+            "https://gaming.ny.gov/fanduel-weekly-report-pdf",
+            "https://gaming.ny.gov/betmgm-weekly-report-pdf",
+            "https://gaming.ny.gov/caesars-sport-book-weekly-report-pdf",
+            "https://gaming.ny.gov/fanatics-weekly-report-pdf",
+            "https://gaming.ny.gov/wynn-interactive-weekly-report-pdf",
+            "https://gaming.ny.gov/rush-street-interactive-weekly-report-pdf",
+            "https://gaming.ny.gov/resorts-world-bet-weekly-report-pdf",
+            "https://gaming.ny.gov/ballybet-weekly-report-pdf",
+            "https://gaming.ny.gov/statewide-sports-wagering-monthly-report-excel",
+        ],
+        "method": "HEAD",
+        "signal": "headers",
+        "headers": BROWSER_HEADERS,
+    },
+
     # OR + AZ stay in PROBE_BLIND_STATES — Playwright tested but doesn't help
     # because the blocks are datacenter-IP-level, not browser-fingerprint.
     # See PROBE_BLIND_STATES comment above for details.
