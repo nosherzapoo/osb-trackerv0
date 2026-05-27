@@ -421,10 +421,16 @@ class NYScraper(BaseStateScraper):
                 # Format 1: "03/30/25" or "2025-04-01"
                 try:
                     period_end = pd.to_datetime(date_str).date()
+                    # pandas 3.x silently parses "Apr-26" as year 0001 (month=Apr,
+                    # day=26) instead of raising like 2.x, so the regex fallback
+                    # below never fired and every per-operator monthly row was
+                    # silently dropped on the VPS. Reject implausible years here.
+                    if period_end.year < 2020:
+                        period_end = None
                 except Exception:
                     pass
 
-                # Format 2: "Apr-25" (statewide monthly)
+                # Format 2: "Apr-25" (statewide monthly + per-operator monthly under pandas 3)
                 if period_end is None:
                     m = re.match(r'^([A-Za-z]{3})-(\d{2})$', date_str)
                     if m:
