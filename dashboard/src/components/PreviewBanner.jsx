@@ -16,6 +16,10 @@ export default function PreviewBanner() {
   const { isAuthenticated } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
   const [showSignup, setShowSignup] = useState(false);
+  // Login temporarily disabled (Supabase auth offline) — all data is public,
+  // so hide the preview-mode banner and its sign-in / get-access CTAs.
+  return null;
+  // eslint-disable-next-line no-unreachable
   if (isAuthenticated) return null;
   return (
     <>

@@ -63,24 +63,9 @@ export default function Sidebar({ activeView, onNavigate, dataAsOf }) {
             <div className="sidebar-account-name">{user?.name || user?.email}</div>
           </div>
         ) : (
-          <>
-            <button
-              className="sidebar-signup-btn"
-              onClick={() => setShowSignup(true)}
-              aria-label="Create an account for live data"
-            >
-              <UserPlus size={14} aria-hidden="true" />
-              <span>Get access</span>
-            </button>
-            <button
-              className="sidebar-login-btn-small"
-              onClick={() => setShowLogin(true)}
-              aria-label="Sign in"
-            >
-              <Lock size={12} aria-hidden="true" />
-              <span>Already have an account? Sign in</span>
-            </button>
-          </>
+          // Login temporarily disabled (Supabase auth offline) — hide the
+          // Get access / Sign in buttons while all data is public.
+          null
         )}
         {dataAsOf && (
           <div className="data-freshness">Data as of: {dataAsOf}</div>

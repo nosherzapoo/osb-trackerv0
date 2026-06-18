@@ -18,6 +18,11 @@ let _loading = null;
 // AuthContext does a window.location.reload() on login/logout, so this
 // function returning a static slice per page-load is safe.
 function applyAuthGate(rows) {
+  // Login temporarily disabled (Supabase auth project offline) — serve all
+  // data to everyone. Restore the two lines below to re-enable the preview
+  // cutoff once auth is back.
+  return rows;
+  // eslint-disable-next-line no-unreachable
   if (isAuthenticatedSync()) return rows;
   return rows.filter(r => !r.period_end || r.period_end <= PREVIEW_CUTOFF);
 }
