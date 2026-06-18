@@ -127,8 +127,25 @@ class NEScraper(BaseStateScraper):
                 continue
             seen_urls.add(full_url)
 
-            # Extract month + year from filename
             decoded = href.replace("%20", " ")
+
+            # NE now publishes a single combined current-year cumulative file
+            # mid-year (e.g. "CY2026 Monthly Gaming Tax Rev_1.pdf"), updated each
+            # month — the same format as the past-year FALLBACK_YEARLY_URLS, not
+            # the per-month "March 2026 ..." files this loop originally assumed.
+            # Treat it as a cumulative file (parser extracts each month's rows).
+            cy = re.search(r'cy\s*(\d{4})', decoded, re.IGNORECASE)
+            if cy and int(cy.group(1)) == current_year:
+                periods.append({
+                    "download_url": full_url,
+                    "year": current_year,
+                    "period_end": date(current_year, 12, 31),
+                    "period_type": "monthly",
+                    "is_monthly_pdf": False,
+                })
+                continue
+
+            # Extract month + year from filename (per-month PDF variant)
             m = re.search(r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{4})',
                           decoded, re.IGNORECASE)
             if not m:
