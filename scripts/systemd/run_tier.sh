@@ -18,6 +18,15 @@ PY="$REPO/.venv/bin/python"
 cd "$REPO"
 echo "[$START_TS] tier=$TIER starting"
 
+# A git process killed mid-operation (e.g. a scrape terminated during commit)
+# leaves .git/index.lock behind, which silently blocks ALL future commits/pushes
+# until cleared by hand — this froze the data pipeline for 18 days once. Clear a
+# stale lock only when no git process is actually running.
+if [ -f .git/index.lock ] && ! pgrep -x git >/dev/null; then
+    echo "[$START_TS] removing stale .git/index.lock"
+    rm -f .git/index.lock
+fi
+
 git pull --rebase --autostash || echo "git pull failed (continuing)"
 
 STATES=$("$PY" -c "
