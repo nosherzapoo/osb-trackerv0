@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """
-Build a master Excel workbook with three sheets — Handle, GGR, Hold — laid out
-as states (rows) x month-year (columns), from the earliest month any state has
-data through the latest. Cells are blank where a state has no data for a month.
+Build master Excel workbooks laid out as states (rows) x time-period (columns),
+with three sheets each — Handle, GGR, Hold — and a US Total row at the bottom.
 
-Each cell is a statewide MONTHLY total, combined across channels (online +
-retail), computed with the same anti-double-counting rules the dashboard uses:
+Two files are produced:
+  - OSB_Master_Handle_GGR_Hold.xlsx            (columns = month-year)
+  - OSB_Master_Quarterly_Handle_GGR_Hold.xlsx  (columns = quarter-year)
+
+Columns start at 2018 (NV has data back to 2010 but every other state begins
+2018+). Cells are blank where a state has no data for that period.
+
+Each cell is a statewide total, combined across channels (online + retail),
+computed with the same anti-double-counting rules the dashboard uses:
   - monthly rows only, excluding per-sport breakdown rows
   - if per-operator rows exist, sum those (NOT the TOTAL/ALL row)
   - NJ-style fallback: if operators report 0 handle but a TOTAL row has it, use it
   - GGR  = standard_ggr, falling back to gross_revenue
   - Hold = GGR / Handle (blank when handle is missing)
+Quarterly figures sum the available months in each quarter; Hold is recomputed
+as quarter GGR / quarter Handle. The US Total row sums states per period and its
+Hold is national GGR / national Handle (not an average of state holds).
 
-Money is stored as integer cents in the processed CSVs and is converted to
-dollars here. Re-run any time to regenerate from the current data.
+Money is stored as integer cents in the processed CSVs and converted to dollars
+here. Re-run any time to regenerate from the current data.
 
-Usage:  python scripts/build_master_workbook.py [output.xlsx]
+Usage:  python scripts/build_master_workbook.py [output_dir]
 """
 import sys
 import glob
@@ -36,11 +45,14 @@ except Exception:
     STATE_NAMES = {}
 
 PROCESSED = Path("data/processed")
-DEFAULT_OUT = PROCESSED / "OSB_Master_Handle_GGR_Hold.xlsx"
+OUT_MONTHLY = "OSB_Master_Handle_GGR_Hold.xlsx"
+OUT_QUARTERLY = "OSB_Master_Quarterly_Handle_GGR_Hold.xlsx"
 MONTHS_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+START_MONTH = "2018-01"   # earliest column (skip NV's 2010-2017 only tail)
 
 
+# ---- aggregation -----------------------------------------------------------
 def state_month_totals(df):
     """Return {month 'YYYY-MM': {'handle': cents, 'ggr': cents}} for one state."""
     m = df[df["period_type"] == "monthly"].copy()
@@ -83,10 +95,37 @@ def load_all():
     return data, sorted(data.keys())
 
 
-def month_range(data):
-    """Continuous list of 'YYYY-MM' from global earliest to latest."""
+def to_quarters(month_data):
+    """Roll month_data up to {state: {'YYYY-Qn': {handle,ggr}}} (sum of months)."""
+    qdata = {}
+    for st, months in month_data.items():
+        q = {}
+        for ym, rec in months.items():
+            qk = f"{ym[:4]}-Q{(int(ym[5:7]) - 1) // 3 + 1}"
+            slot = q.setdefault(qk, {"handle": 0.0, "ggr": 0.0})
+            slot["handle"] += rec["handle"]
+            slot["ggr"] += rec["ggr"]
+        qdata[st] = q
+    return qdata
+
+
+def period_totals(period_data, periods):
+    """Per-period national totals (cents): {period: {'handle','ggr'}}."""
+    tot = {p: {"handle": 0.0, "ggr": 0.0} for p in periods}
+    for t in period_data.values():
+        for p, rec in t.items():
+            if p in tot:
+                tot[p]["handle"] += rec["handle"]
+                tot[p]["ggr"] += rec["ggr"]
+    return tot
+
+
+def month_range(data, start_floor=START_MONTH):
+    """Continuous list of 'YYYY-MM' from the floor (or earliest data) to latest."""
     all_months = {mo for t in data.values() for mo in t}
     lo, hi = min(all_months), max(all_months)
+    if start_floor and start_floor > lo:
+        lo = start_floor
     y, m = int(lo[:4]), int(lo[5:7])
     hy, hm = int(hi[:4]), int(hi[5:7])
     months = []
@@ -94,17 +133,47 @@ def month_range(data):
         months.append(f"{y:04d}-{m:02d}")
         m += 1
         if m > 12:
-            m = 1
-            y += 1
+            m, y = 1, y + 1
     return months
 
 
-def col_header(ym):
-    y, m = int(ym[:4]), int(ym[5:7])
-    return f"{MONTHS_ABBR[m - 1]} {y}"
+def quarter_range(months):
+    """Continuous list of 'YYYY-Qn' spanning the same range as `months`."""
+    def qk(ym):
+        return (int(ym[:4]), (int(ym[5:7]) - 1) // 3 + 1)
+    lo, hi = qk(months[0]), qk(months[-1])
+    out = []
+    y, q = lo
+    while (y, q) <= hi:
+        out.append(f"{y:04d}-Q{q}")
+        q += 1
+        if q > 4:
+            q, y = 1, y + 1
+    return out
 
 
-# ---- styling helpers -------------------------------------------------------
+def month_header(ym):
+    return f"{MONTHS_ABBR[int(ym[5:7]) - 1]} {ym[:4]}"
+
+
+def quarter_header(qk):
+    return f"{qk[5:]} {qk[:4]}"   # "2018-Q1" -> "Q1 2018"
+
+
+def _metric_value(rec, kind):
+    if not rec:
+        return None
+    h, g = rec["handle"], rec["ggr"]
+    if kind == "handle":
+        return h / 100.0 if h and h > 0 else None
+    if kind == "ggr":
+        return g / 100.0 if g and g > 0 else None
+    if kind == "hold":
+        return (g / h) if (h and h > 0 and g and g > 0) else None
+    return None
+
+
+# ---- styling ---------------------------------------------------------------
 HEADER_FILL = PatternFill("solid", fgColor="1F2A44")
 HEADER_FONT = Font(bold=True, color="FFFFFF", size=10)
 STATE_FONT = Font(bold=True, size=10)
@@ -113,73 +182,75 @@ THIN = Side(style="thin", color="D9D9D9")
 BORDER = Border(bottom=THIN, right=THIN)
 CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 LEFT = Alignment(horizontal="left", vertical="center")
+TOTAL_FONT = Font(bold=True, size=10, color="1F2A44")
+TOTAL_FILL = PatternFill("solid", fgColor="EAEFF7")
+TOP = Side(style="medium", color="1F2A44")
+TOTAL_BORDER = Border(top=TOP, bottom=THIN, right=THIN)
 
 
-def write_sheet(wb, title, data, states, months, kind):
-    """kind: 'money' (dollars) or 'pct' (hold fraction)."""
+def write_sheet(wb, title, period_data, states, periods, header_fn, kind, totals):
     ws = wb.create_sheet(title)
-    # Header row
+    money_fmt, pct_fmt = '$#,##0', '0.0%'
+    ncols = 2 + len(periods)
+
+    # Header
     ws.cell(row=1, column=1, value="State")
     ws.cell(row=1, column=2, value="Name")
-    for j, ym in enumerate(months):
-        ws.cell(row=1, column=3 + j, value=col_header(ym))
-    for c in range(1, 3 + len(months)):
+    for j, p in enumerate(periods):
+        ws.cell(row=1, column=3 + j, value=header_fn(p))
+    for c in range(1, ncols + 1):
         cell = ws.cell(row=1, column=c)
-        cell.fill = HEADER_FILL
-        cell.font = HEADER_FONT
-        cell.alignment = CENTER
-        cell.border = BORDER
+        cell.fill, cell.font, cell.alignment, cell.border = HEADER_FILL, HEADER_FONT, CENTER, BORDER
 
-    money_fmt = '$#,##0'
-    pct_fmt = '0.0%'
+    # State rows
     for i, st in enumerate(states):
         r = 2 + i
-        sc = ws.cell(row=r, column=1, value=st)
-        sc.font = STATE_FONT
-        sc.alignment = LEFT
-        nm = ws.cell(row=r, column=2, value=STATE_NAMES.get(st, ""))
-        nm.font = NAME_FONT
-        nm.alignment = LEFT
-        for j, ym in enumerate(months):
-            rec = data[st].get(ym)
-            val = None
-            if rec:
-                h, g = rec["handle"], rec["ggr"]
-                if kind == "handle":
-                    val = h / 100.0 if h and h > 0 else None
-                elif kind == "ggr":
-                    val = g / 100.0 if g and g > 0 else None
-                elif kind == "hold":
-                    val = (g / h) if (h and h > 0 and g and g > 0) else None
-            cell = ws.cell(row=r, column=3 + j, value=val)
+        c1 = ws.cell(row=r, column=1, value=st); c1.font, c1.alignment = STATE_FONT, LEFT
+        c2 = ws.cell(row=r, column=2, value=STATE_NAMES.get(st, "")); c2.font, c2.alignment = NAME_FONT, LEFT
+        for j, p in enumerate(periods):
+            cell = ws.cell(row=r, column=3 + j, value=_metric_value(period_data[st].get(p), kind))
             cell.number_format = pct_fmt if kind == "hold" else money_fmt
             cell.border = BORDER
 
-    # Freeze header + state/name columns; auto-filter; widths
+    # US Total row
+    tr = 2 + len(states)
+    t1 = ws.cell(row=tr, column=1, value="US"); t1.font, t1.alignment = TOTAL_FONT, LEFT
+    t2 = ws.cell(row=tr, column=2, value="United States — total"); t2.font, t2.alignment = TOTAL_FONT, LEFT
+    for c in (1, 2):
+        ws.cell(row=tr, column=c).fill = TOTAL_FILL
+        ws.cell(row=tr, column=c).border = TOTAL_BORDER
+    for j, p in enumerate(periods):
+        cell = ws.cell(row=tr, column=3 + j, value=_metric_value(totals.get(p), kind))
+        cell.number_format = pct_fmt if kind == "hold" else money_fmt
+        cell.font, cell.fill, cell.border = TOTAL_FONT, TOTAL_FILL, TOTAL_BORDER
+
+    # Frozen panes, filter over state rows only (total stays pinned below), widths
     ws.freeze_panes = "C2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(2 + len(months))}{1 + len(states)}"
+    ws.auto_filter.ref = f"A1:{get_column_letter(ncols)}{1 + len(states)}"
     ws.column_dimensions["A"].width = 7
     ws.column_dimensions["B"].width = 20
-    for j in range(len(months)):
-        ws.column_dimensions[get_column_letter(3 + j)].width = 12
+    width = 12 if title != "Hold" else 10
+    for j in range(len(periods)):
+        ws.column_dimensions[get_column_letter(3 + j)].width = width
     ws.row_dimensions[1].height = 28
-    return ws
 
 
-def write_info(wb, states, months):
+def write_info(wb, states, periods, header_fn, granularity):
     ws = wb.create_sheet("Info")
     gen = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
-        ("OSB Master Workbook", ""),
+        (f"OSB Master Workbook — {granularity}", ""),
         ("Generated (UTC)", gen),
-        ("Coverage", f"{col_header(months[0])} – {col_header(months[-1])}  ({len(months)} months, {len(states)} states)"),
+        ("Coverage", f"{header_fn(periods[0])} – {header_fn(periods[-1])}  "
+                     f"({len(periods)} {granularity.lower()} columns, {len(states)} states + US total)"),
         ("", ""),
-        ("Sheets", "Handle, GGR, Hold — states as rows, month-year as columns"),
-        ("Values", "Statewide MONTHLY totals, combined across channels (online + retail)"),
+        ("Sheets", "Handle, GGR, Hold — states as rows, time-period as columns, US Total at bottom"),
+        ("Values", "Statewide totals, combined across channels (online + retail)"),
         ("Handle", "Total amount wagered (US$)"),
         ("GGR", "Gross gaming revenue: standard_ggr, falling back to gross_revenue (US$)"),
-        ("Hold", "GGR / Handle (blank when handle not reported, e.g. NE reports GGR only)"),
-        ("Blank cells", "State did not report / has no data for that month"),
+        ("Hold", "GGR / Handle. US Total hold = national GGR / national Handle"),
+        ("Blank cells", "State did not report / has no data for that period (e.g. NE reports GGR only)"),
+        ("Quarterly", "Sums the available months in each quarter; the latest quarter may be partial"),
         ("Aggregation", "Monthly non-sport rows; sum per-operator rows (not the TOTAL row); "
                         "NJ-style fallback to a TOTAL handle row when operators report none"),
         ("Source", "data/processed/<STATE>.csv  —  regenerate: python scripts/build_master_workbook.py"),
@@ -189,35 +260,35 @@ def write_info(wb, states, months):
         a.font = Font(bold=True, size=11) if i == 0 else Font(bold=True, size=10)
         ws.cell(row=1 + i, column=2, value=v).font = Font(size=10)
     ws.column_dimensions["A"].width = 16
-    ws.column_dimensions["B"].width = 90
-    return ws
+    ws.column_dimensions["B"].width = 95
+
+
+def build_workbook(out_path, period_data, states, periods, header_fn, granularity):
+    totals = period_totals(period_data, periods)
+    wb = Workbook()
+    wb.remove(wb.active)
+    write_sheet(wb, "Handle", period_data, states, periods, header_fn, "handle", totals)
+    write_sheet(wb, "GGR", period_data, states, periods, header_fn, "ggr", totals)
+    write_sheet(wb, "Hold", period_data, states, periods, header_fn, "hold", totals)
+    write_info(wb, states, periods, header_fn, granularity)
+    wb.save(out_path)
+    print(f"Wrote {out_path}  ({len(states)} states x {len(periods)} {granularity.lower()} cols, "
+          f"{header_fn(periods[0])} -> {header_fn(periods[-1])})")
 
 
 def main():
-    out = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_OUT
+    out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else PROCESSED
     data, states = load_all()
     if not states:
         print("No state data found.")
         sys.exit(1)
+
     months = month_range(data)
+    build_workbook(out_dir / OUT_MONTHLY, data, states, months, month_header, "Monthly")
 
-    wb = Workbook()
-    wb.remove(wb.active)  # drop default sheet
-    write_info(wb, states, months)
-    write_sheet(wb, "Handle", data, states, months, "handle")
-    write_sheet(wb, "GGR", data, states, months, "ggr")
-    write_sheet(wb, "Hold", data, states, months, "hold")
-    # Put data sheets first, Info last
-    wb.move_sheet("Info", offset=3)
-    wb.save(out)
-
-    # Coverage summary
-    print(f"Wrote {out}")
-    print(f"  {len(states)} states x {len(months)} months "
-          f"({col_header(months[0])} -> {col_header(months[-1])})")
-    pop = {st: sum(1 for ym in months if data[st].get(ym, {}).get("handle", 0) > 0) for st in states}
-    print("  states with most months of handle data:",
-          ", ".join(f"{s}={n}" for s, n in sorted(pop.items(), key=lambda x: -x[1])[:5]))
+    qdata = to_quarters(data)
+    quarters = quarter_range(months)
+    build_workbook(out_dir / OUT_QUARTERLY, qdata, states, quarters, quarter_header, "Quarterly")
 
 
 if __name__ == "__main__":
