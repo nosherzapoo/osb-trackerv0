@@ -2,7 +2,10 @@ playwright
 pdfplumber
 openpyxl
 xlrd
-pandas
+# Pinned <3: pandas 3.0 silently parses "Apr-26" as year 0001 instead of
+# raising (2.x behavior the scrapers' date fallbacks rely on), which silently
+# dropped monthly rows on the VPS. See ne_scraper/ny_scraper date handling.
+pandas>=2.2,<3
 requests
 beautifulsoup4
 python-dotenv
