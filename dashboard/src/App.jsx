@@ -44,7 +44,8 @@ export default function App() {
   }, []);
 
   const dataAsOf = useMemo(() => {
-    if (!isAuthenticated) return formatDate(PREVIEW_CUTOFF);
+    // Login temporarily disabled — all data is public, so show the real
+    // "as of" date for everyone (not the preview cutoff).
     const d = new Date();
     return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
   }, [isAuthenticated]);
