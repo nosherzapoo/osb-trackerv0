@@ -4,19 +4,21 @@ Source: gaming.az.gov monthly PDF reports
 Format: PDF (operator-level data with retail/mobile split)
 Launch: September 2021
 Tax: 8% retail, 10% online on adjusted gross event wagering receipts
-Note: Uses Playwright with stealth settings to bypass Cloudflare protection on
-      gaming.az.gov. Discovers reports via paginated blog listing, then follows
-      links to individual report pages to find PDF download URLs. PDF parsing
+Note: gaming.az.gov sits behind a Cloudflare challenge that headless Chromium
+      no longer passes (2026-10), so this drives a real, headed Chrome window
+      parked off-screen. Reports are discovered as direct PDF links on
+      /resources/reports (the old blog-terms listing is gone) and fetched from
+      inside the page so the request carries Cloudflare clearance. PDF parsing
       splits on '$' signs to extract operator names and financial values.
 """
 
 import sys
 import re
+import base64
 import calendar
-import time
 from pathlib import Path
 from datetime import date
-from urllib.parse import urljoin
+from urllib.parse import urljoin, unquote
 
 import pandas as pd
 import pdfplumber
@@ -27,9 +29,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from scrapers.base_scraper import BaseStateScraper
 from scrapers.scraper_utils import setup_logger
 
-# Reports listing URL (paginated: ?page=0 through ?page=6+)
-AZ_REPORTS_INDEX = "https://gaming.az.gov/blog-terms/event-wagering-revenue-reports"
-AZ_MAX_PAGES = 10  # Maximum pagination pages to check
+# Reports page linking EW (event wagering) PDFs directly
+AZ_REPORTS_PAGE = "https://gaming.az.gov/resources/reports"
 
 AZ_BASE_URL = "https://gaming.az.gov"
 
@@ -46,11 +47,15 @@ MONTH_NAMES = {
 # Reverse lookup: month number -> full name
 MONTH_NUM_TO_NAME = {v: k for k, v in MONTH_NAMES.items()}
 
+# Full names plus abbreviations seen in file names ("Sept 2021", "Jan 2023")
+MONTH_LOOKUP = {**MONTH_NAMES, **{k[:3]: v for k, v in MONTH_NAMES.items()}, "sept": 9}
+
 
 STEALTH_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--no-sandbox",
     "--disable-dev-shm-usage",
+    "--window-position=-2400,-2400",  # headed, but keep the window off-screen
 ]
 STEALTH_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -67,22 +72,33 @@ class AZScraper(BaseStateScraper):
         self._context = None
 
     def _ensure_browser(self):
-        """Lazily start Playwright browser with stealth settings."""
+        """Lazily start a headed Chrome (headless is stuck on the Cloudflare challenge)."""
         if self._browser is not None:
             return
         from playwright.sync_api import sync_playwright
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(
-            headless=True,
-            args=STEALTH_ARGS,
-        )
+        try:
+            self._browser = self._pw.chromium.launch(
+                headless=False, channel="chrome", args=STEALTH_ARGS,
+            )
+            ua = None  # real Chrome's own UA is the most convincing
+        except Exception as e:
+            self.logger.warning(f"  Chrome unavailable ({e}); falling back to bundled Chromium")
+            self._browser = self._pw.chromium.launch(headless=False, args=STEALTH_ARGS)
+            ua = STEALTH_UA
         self._context = self._browser.new_context(
-            user_agent=STEALTH_UA,
+            user_agent=ua,
             viewport={"width": 1280, "height": 900},
-            java_script_enabled=True,
-            accept_downloads=True,
         )
-        self.logger.info("Started Playwright browser with stealth settings")
+        self.logger.info("Started headed Playwright browser")
+
+    def _wait_for_cloudflare(self, page, timeout_s: int = 30):
+        """Wait out Cloudflare's interstitial ("Just a moment...") if shown."""
+        for _ in range(timeout_s):
+            if "just a moment" not in page.title().lower():
+                return
+            page.wait_for_timeout(1000)
+        raise RuntimeError("Cloudflare challenge did not clear")
 
     def _close_browser(self):
         """Close Playwright browser and stop the instance."""
@@ -105,7 +121,8 @@ class AZScraper(BaseStateScraper):
         self._ensure_browser()
         page = self._context.new_page()
         try:
-            page.goto(url, timeout=30000, wait_until="domcontentloaded")
+            page.goto(url, timeout=45000, wait_until="domcontentloaded")
+            self._wait_for_cloudflare(page)
             page.wait_for_timeout(wait_ms)
             html = page.content()
             return html
@@ -126,197 +143,125 @@ class AZScraper(BaseStateScraper):
     # ------------------------------------------------------------------
     # discover_periods
     # ------------------------------------------------------------------
-    def _get_existing_periods(self) -> set:
-        """Read the CSV to find which periods we already have data for."""
-        csv_path = Path("data/processed") / f"{self.state_code}.csv"
-        if not csv_path.exists():
-            return set()
-        try:
-            df = pd.read_csv(csv_path, usecols=['period_end'], low_memory=False)
-            return set(df['period_end'].unique())
-        except Exception:
-            return set()
-
     def discover_periods(self) -> list[dict]:
         """
-        Discover AZ report periods. Only crawls listing page 0 (newest first).
-        Stops paginating once all found periods already exist in our data.
-        Only visits individual report pages for new periods we don't have yet.
+        Discover AZ report periods from the /resources/reports page, which
+        links every recent EW PDF directly (the old blog-terms listing and
+        per-report pages were removed in a 2026 site redesign).
+
+        The page only carries the current year's reports, so on --backfill
+        older periods are rebuilt from PDFs already cached in data/raw/AZ.
         """
-        existing = set() if getattr(self, '_backfill', False) else self._get_existing_periods()
-        report_pages = self._discover_report_page_links(existing)
-        self.logger.info(f"  Found {len(report_pages)} report page links")
+        html = self._fetch_page_html(AZ_REPORTS_PAGE)
+        links = self._parse_ew_links(html) if html else {}
+        self.logger.info(f"  Found {len(links)} EW report links on {AZ_REPORTS_PAGE}")
+        if not links:
+            self.logger.warning("  No EW report links found -- page layout may have changed")
 
-        periods = []
-        for url, month_num, year in report_pages:
-            last_day = calendar.monthrange(year, month_num)[1]
-            period_end = date(year, month_num, last_day)
-            period_str = str(period_end)
+        periods = {}
+        for (year, month_num), url in links.items():
+            periods[(year, month_num)] = self._make_period(year, month_num, url)
 
-            if period_str in existing:
-                # Already have this period - no need to visit report page
-                periods.append({
-                    "period_end": period_end,
-                    "period_type": "monthly",
-                    "year": year,
-                    "month": month_num,
-                    "month_name": MONTH_NUM_TO_NAME[month_num].capitalize(),
-                    "report_page_url": url,
-                    "download_url": None,
-                })
-                continue
-
-            # New period - visit report page to find PDF URL
-            pdf_url = self._find_pdf_on_report_page(url)
-            periods.append({
-                "period_end": period_end,
-                "period_type": "monthly",
-                "year": year,
-                "month": month_num,
-                "month_name": MONTH_NUM_TO_NAME[month_num].capitalize(),
-                "report_page_url": url,
-                "download_url": pdf_url,
-            })
-
-        periods.sort(key=lambda p: p["period_end"])
-        new_count = sum(1 for p in periods if p.get('download_url'))
-        self.logger.info(f"  {len(periods)} total periods, {new_count} new")
-        return periods
-
-    def _discover_report_page_links(self, existing_periods: set) -> list[tuple]:
-        """
-        Crawl listing pages to find report links. Starts from page 0 (newest).
-        Stops paginating once a full page of results are all already in our data.
-        Uses Playwright to bypass Cloudflare.
-        """
-        results = []
-        seen_urls = set()
-
-        for page_num in range(AZ_MAX_PAGES):
-            url = f"{AZ_REPORTS_INDEX}?page={page_num}"
-            html = self._fetch_page_html(url)
-
-            if html is None:
-                self.logger.warning(f"  Failed to fetch listing page {page_num}")
-                break
-
-            soup = BeautifulSoup(html, "html.parser")
-            links_found = 0
-            all_existing = True
-
-            for link in soup.find_all("a", href=True):
-                href = link["href"]
-                match = re.search(
-                    r'/(?:resources/reports/)?event-wagering-revenue-report-'
-                    r'(\w+)-(\d{4})',
-                    href, re.IGNORECASE
-                )
-                if not match:
+        if getattr(self, '_backfill', False):
+            known_urls = self._existing_source_urls()
+            for f in sorted(self.raw_dir.glob("AZ_*.pdf")):
+                m = re.fullmatch(r"AZ_(\d{4})_(\d{2})\.pdf", f.name)
+                if not m:
                     continue
+                key = (int(m.group(1)), int(m.group(2)))
+                if key not in periods:
+                    period = self._make_period(*key, None)
+                    period["source_url"] = known_urls.get(str(period["period_end"]))
+                    periods[key] = period
 
-                month_str = match.group(1).lower()
-                year = int(match.group(2))
+        result = sorted(periods.values(), key=lambda p: p["period_end"])
+        self.logger.info(f"  {len(result)} periods to process")
+        return result
 
-                if month_str not in MONTH_NAMES:
-                    continue
+    def _existing_source_urls(self) -> dict:
+        """period_end -> source_url from the current CSV (provenance for cached PDFs)."""
+        csv_path = Path("data/processed") / f"{self.state_code}.csv"
+        try:
+            df = pd.read_csv(csv_path, usecols=["period_end", "source_url"], low_memory=False)
+        except Exception:
+            return {}
+        df = df.dropna(subset=["source_url"]).drop_duplicates("period_end")
+        return dict(zip(df["period_end"], df["source_url"]))
 
-                month_num = MONTH_NAMES[month_str]
-                full_url = urljoin(AZ_BASE_URL, href)
+    @staticmethod
+    def _make_period(year: int, month_num: int, url: str | None) -> dict:
+        last_day = calendar.monthrange(year, month_num)[1]
+        return {
+            "period_end": date(year, month_num, last_day),
+            "period_type": "monthly",
+            "year": year,
+            "month": month_num,
+            "month_name": MONTH_NUM_TO_NAME[month_num].capitalize(),
+            "download_url": url,
+        }
 
-                if full_url not in seen_urls:
-                    seen_urls.add(full_url)
-                    results.append((full_url, month_num, year))
-                    links_found += 1
-
-                    # Check if this period already exists
-                    last_day = calendar.monthrange(year, month_num)[1]
-                    period_str = str(date(year, month_num, last_day))
-                    if period_str not in existing_periods:
-                        all_existing = False
-
-            self.logger.info(f"  Page {page_num}: {links_found} links")
-
-            if links_found == 0 and page_num > 0:
-                break
-
-            # Stop paginating if everything on this page already exists
-            if all_existing and links_found > 0 and page_num > 0:
-                self.logger.info(f"  All periods on page {page_num} already exist, stopping")
-                break
-
-            time.sleep(0.5)
-
-        return results
-
-    def _find_pdf_on_report_page(self, report_page_url: str) -> str | None:
+    def _parse_ew_links(self, html: str) -> dict:
         """
-        Fetch an individual report page and find the PDF download link.
-        Returns the full PDF URL, or None if not found.
-        Uses Playwright to bypass Cloudflare.
+        Map (year, month) -> PDF URL for Event Wagering reports, e.g.
+          /sites/default/files/2026-09/EW%20Website%20Report-July%202026%20UNAUDITED.pdf
+        FS (fantasy sports) reports share the page and are ignored. When a
+        month is linked more than once (re-uploads), the copy in the newest
+        YYYY-MM upload folder wins.
         """
-        html = self._fetch_page_html(report_page_url)
-        if html is None:
-            return None
-
         soup = BeautifulSoup(html, "html.parser")
-
+        best = {}
         for link in soup.find_all("a", href=True):
             href = link["href"]
-            if href.lower().endswith(".pdf"):
-                full_url = urljoin(AZ_BASE_URL, href)
-                return full_url
-
-        self.logger.warning(f"  No PDF link found on {report_page_url}")
-        return None
+            name = unquote(href.rsplit("/", 1)[-1])
+            if not name.lower().endswith(".pdf"):
+                continue
+            m = re.match(
+                r"EW\b.*?Report\W+(?:for\s+Website\W+)?([A-Za-z]+)\.?\s*(\d{4})",
+                name, re.IGNORECASE,
+            )
+            if not m:
+                continue
+            month_num = MONTH_LOOKUP.get(m.group(1).lower())
+            if not month_num:
+                continue
+            year = int(m.group(2))
+            folder = re.search(r"/files/(\d{4}-\d{2})/", href)
+            rank = folder.group(1) if folder else ""
+            key = (year, month_num)
+            if key not in best or rank > best[key][0]:
+                best[key] = (rank, urljoin(AZ_BASE_URL, href))
+        return {k: v[1] for k, v in best.items()}
 
     # ------------------------------------------------------------------
     # download_report
     # ------------------------------------------------------------------
     def download_report(self, period_info: dict) -> Path:
-        """Download AZ event wagering PDF for a month using Playwright."""
+        """Download an AZ event wagering PDF through the Cloudflare-cleared browser."""
         year = period_info["year"]
         month = period_info["month"]
         filename = f"AZ_{year}_{month:02d}.pdf"
         save_path = self.raw_dir / filename
+        download_url = period_info.get("download_url")
 
-        if not self._should_redownload(save_path):
-            # Validate that cached file is actually a PDF
+        # Backfill-only periods have no live link; their cached PDF is the source.
+        if save_path.exists() and (not download_url or not self._should_redownload(save_path)):
             with open(save_path, "rb") as f:
                 header = f.read(5)
             if header == b"%PDF-":
                 return save_path
-            else:
-                self.logger.warning(
-                    f"  Cached file {filename} is not a valid PDF (header: {header!r}), "
-                    f"re-downloading"
-                )
-                save_path.unlink()
+            self.logger.warning(
+                f"  Cached file {filename} is not a valid PDF (header: {header!r}), "
+                f"re-downloading"
+            )
+            save_path.unlink()
 
-        download_url = period_info.get("download_url")
         if not download_url:
-            # PDF URL wasn't looked up during discovery (cached period) - fetch it now
-            report_page_url = period_info.get("report_page_url")
-            if report_page_url:
-                download_url = self._find_pdf_on_report_page(report_page_url)
-            if not download_url:
-                raise FileNotFoundError(
-                    f"No PDF URL discovered for {period_info['month_name']} {year}. "
-                    f"Report page: {period_info.get('report_page_url', 'unknown')}"
-                )
+            raise FileNotFoundError(
+                f"No PDF URL discovered for {period_info['month_name']} {year}"
+            )
 
         try:
-            self._ensure_browser()
-            # Playwright triggers a download for PDF URLs; use expect_download
-            # with evaluate() to avoid goto's "Download is starting" error
-            page = self._context.new_page()
-            try:
-                with page.expect_download(timeout=60000) as download_info:
-                    page.evaluate("url => window.location.href = url", download_url)
-                download = download_info.value
-                download.save_as(save_path)
-                content = save_path.read_bytes()
-            finally:
-                page.close()
+            content = self._fetch_pdf_bytes(download_url)
 
             if len(content) < 1000:
                 raise ValueError(
@@ -343,6 +288,33 @@ class AZScraper(BaseStateScraper):
             raise FileNotFoundError(
                 f"Failed to download PDF for {period_info['month_name']} {year}: {e}"
             ) from e
+
+    def _fetch_pdf_bytes(self, url: str) -> bytes:
+        """
+        Fetch a PDF via fetch() inside a page on gaming.az.gov, so the request
+        carries the browser's Cloudflare clearance. (Navigating to the PDF in
+        headed Chrome opens the built-in viewer instead of firing a download.)
+        """
+        self._ensure_browser()
+        page = self._context.new_page()
+        try:
+            page.goto(AZ_BASE_URL + "/", timeout=45000, wait_until="domcontentloaded")
+            self._wait_for_cloudflare(page)
+            b64 = page.evaluate(
+                """async (url) => {
+                    const r = await fetch(url, {credentials: 'include'});
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    const buf = new Uint8Array(await r.arrayBuffer());
+                    let bin = '';
+                    for (let i = 0; i < buf.length; i += 0x8000)
+                        bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+                    return btoa(bin);
+                }""",
+                url,
+            )
+            return base64.b64decode(b64)
+        finally:
+            page.close()
 
     # ------------------------------------------------------------------
     # parse_report
@@ -391,7 +363,7 @@ class AZScraper(BaseStateScraper):
             return pd.DataFrame()
 
         # Add source provenance to each row
-        source_url = period_info.get('download_url', period_info.get('url', None))
+        source_url = period_info.get('download_url') or period_info.get('source_url')
         for row in rows:
             row["source_file"] = file_path.name
             row["source_page"] = None  # text merged across pages; per-row page not tracked
