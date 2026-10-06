@@ -173,10 +173,19 @@ def spawn_job(*, kind: str, params: dict, actor: str, args: list[str]) -> str:
         )
         conn.commit()
 
+    # cgroup-level backstop: if the job (and all its descendants — node,
+    # chrome-headless-shell) wedges, systemd SIGTERMs then SIGKILLs the whole
+    # unit. Set above run_ops_job's own per-state timeout so the graceful path
+    # normally wins; this only fires if the python layer itself hangs. A stuck
+    # NY Playwright job ran 3+ days with no cap before this (2026-06-29).
+    n_targets = max(1, sum(1 for a in args if not a.startswith("-")))
+    runtime_max_sec = max(3600, 1800 * n_targets + 1800)
     cmd = [
         "systemd-run",
         f"--unit={unit}",
         "--collect",
+        f"--property=RuntimeMaxSec={runtime_max_sec}",
+        "--property=KillMode=mixed",
         "--description", f"ops job {kind} ({actor})",
         f"--setenv=OPS_TRIGGERED_BY={actor}",
         f"--setenv=OPS_SYSTEMD_UNIT={unit}",

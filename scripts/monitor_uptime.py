@@ -37,11 +37,14 @@ SMTP_PORT = 587
 RESPONSE_TIME_LIMIT_S = 8.0
 RESEND_INTERVAL_S = 6 * 3600  # 6 hours
 PROBE_TIMEOUT_S = 10.0
+# Require this many consecutive failing probes before emailing a DOWN alert.
+# The monitor runs every ~5 min, so 2 = ~5-10 min of sustained failure. This
+# debounces transient slowness on the 1-core VPS (a busy scrape can briefly
+# push Gitea past the 8s limit) so we don't flap DOWN/RECOVERED emails.
+FAIL_THRESHOLD = 2
 
 STATE_PATH = Path("/srv/osb-trackerv0/data/uptime_state.json")
 LOCAL_STATE_FALLBACK = Path(__file__).resolve().parent.parent / "data" / "uptime_state.json"
-
-SUPABASE_APIKEY = "sb_publishable_RSlc6gLlCOAtuGTHLWsMwA_dOb9fHWR"
 
 ENDPOINTS = [
     {
@@ -68,15 +71,10 @@ ENDPOINTS = [
         "json_is_array": True,
         "tells_us": "new aggregate view is live",
     },
-    {
-        "name": "supabase_auth_settings",
-        "url": "https://auth.osbdata.com/auth/v1/settings",
-        "method": "GET",
-        "headers": {"apikey": SUPABASE_APIKEY},
-        "expected_status": [200],
-        "json_is_object": True,
-        "tells_us": "Supabase reverse-proxy and Supabase upstream both alive",
-    },
+    # NOTE: supabase_auth_settings endpoint removed 2026-06-29. auth.osbdata.com
+    # intentionally returns 503 (the nginx fix from the 2026-06-18 incident,
+    # Supabase project was deleted). Monitoring it just re-alerted every 6h.
+    # Re-add this endpoint once Supabase is rebuilt and the auth proxy restored.
     {
         "name": "ops_api_notify_signup",
         "url": "https://api.osbdata.com/ops/auth/notify-signup",
@@ -282,6 +280,11 @@ def update_state_and_alert(results: list[dict], send_email: bool) -> dict:
         prev_status = prev.get("last_status")  # "PASS" / "FAIL" / None
         new_status = "PASS" if r["passed"] else "FAIL"
 
+        prev_consec = prev.get("consecutive_fail", 0)
+        consecutive_fail = prev_consec + 1 if new_status == "FAIL" else 0
+        # Whether a DOWN email was already sent for the current outage.
+        prev_alerted = prev.get("alerted", False)
+
         entry = {
             "last_status": new_status,
             "last_status_change": prev.get("last_status_change") or now,
@@ -290,41 +293,58 @@ def update_state_and_alert(results: list[dict], send_email: bool) -> dict:
             "last_status_code": r["status_code"],
             "last_elapsed_s": r["elapsed_s"],
             "last_reason": r["reason"],
+            "consecutive_fail": consecutive_fail,
+            "alerted": prev_alerted,
         }
 
         transitioned = prev_status is not None and prev_status != new_status
-        first_seen_fail = prev_status is None and new_status == "FAIL"
-        if transitioned or first_seen_fail:
+        # Stamp the start of an outage on the FIRST failing probe of a streak,
+        # so the "failing since" in the recovery email reflects real onset.
+        if new_status == "FAIL" and prev_consec == 0:
+            entry["last_status_change"] = now
+        elif transitioned and new_status == "PASS":
             entry["last_status_change"] = now
 
         should_email = False
         email_kind = None
 
-        if new_status == "FAIL" and (transitioned or first_seen_fail):
-            should_email = True
-            email_kind = "fail"
-        elif new_status == "FAIL" and prev_status == "FAIL":
-            # Suppress unless 6h has elapsed since last alert.
-            last_sent = prev.get("last_alert_sent")
-            if not last_sent:
-                should_email = True
-                email_kind = "fail"
-            else:
-                try:
-                    dt_last = datetime.strptime(last_sent, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-                    age = (datetime.now(timezone.utc) - dt_last).total_seconds()
-                    if age >= RESEND_INTERVAL_S:
-                        should_email = True
-                        email_kind = "fail"
-                        summary["resent_after_6h"].append(name)
-                except ValueError:
+        if new_status == "FAIL":
+            # Only alert once the failure is sustained past the debounce
+            # threshold — kills single-probe flaps from transient load.
+            if consecutive_fail >= FAIL_THRESHOLD:
+                if not prev_alerted:
                     should_email = True
                     email_kind = "fail"
-            if not should_email:
+                    entry["alerted"] = True
+                else:
+                    # Already alerted; resend only every 6h while still down.
+                    last_sent = prev.get("last_alert_sent")
+                    if not last_sent:
+                        should_email = True
+                        email_kind = "fail"
+                    else:
+                        try:
+                            dt_last = datetime.strptime(last_sent, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                            age = (datetime.now(timezone.utc) - dt_last).total_seconds()
+                            if age >= RESEND_INTERVAL_S:
+                                should_email = True
+                                email_kind = "fail"
+                                summary["resent_after_6h"].append(name)
+                        except ValueError:
+                            should_email = True
+                            email_kind = "fail"
+                    if not should_email:
+                        summary["still_failing"].append(name)
+            else:
+                # Below threshold: failing but not yet alert-worthy.
                 summary["still_failing"].append(name)
-        elif new_status == "PASS" and prev_status == "FAIL":
-            should_email = True
-            email_kind = "recovery"
+        elif new_status == "PASS":
+            # Recover only if we actually sent a DOWN alert for this outage —
+            # a single blip that never alerted shouldn't email a RECOVERED.
+            entry["alerted"] = False
+            if prev_alerted:
+                should_email = True
+                email_kind = "recovery"
 
         if transitioned:
             summary["transitions"].append(f"{name}: {prev_status} -> {new_status}")

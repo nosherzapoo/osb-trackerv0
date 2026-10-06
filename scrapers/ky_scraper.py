@@ -13,6 +13,7 @@ Note: Each page has "Online - {Month} {Year}" and "Retail - {Month} {Year}" sect
 
 import sys
 import re
+import json
 import calendar
 from pathlib import Path
 from datetime import date, datetime
@@ -96,346 +97,365 @@ class KYScraper(BaseStateScraper):
         # processing the same month from multiple PDFs with conflicting data.
         self._covered_periods = set()
 
-    # Tableau Public dashboard URL (KHRC data export is blocked, so we screenshot + OCR)
+    # Tableau Public dashboard URL. Recent KY months exist ONLY here (KHRC stopped
+    # publishing per-month PDFs). We drive a headless browser to clear the AWS WAF
+    # challenge, then read the underlying JSON `bootstrapSession` payload directly
+    # (no screenshots / OCR — exact values).
     TABLEAU_BASE = (
         "https://public.tableau.com/views/SportsWageringMarketReport/Monthly"
-        "?:embed=y&:showVizHome=no"
+        "?:embed=y&:showVizHome=no&:language=en-US"
     )
 
+    # Tableau "Measure Names" alias -> our standard money field (dollars).
+    TABLEAU_MEASURES = {
+        "Handle": "handle",
+        "Winnings": "payouts",
+        "Approximate AGR": "net_revenue",
+        "KY Excise Tax": "tax_paid",
+        "Federal Excise Tax Paid": "federal_excise_tax",
+    }
+
+    # On a normal (non-backfill) run, only chase this many of the most recent
+    # missing months from Tableau. Older months never appear retroactively, and
+    # re-fetching 30+ months every run is slow and pointless. backfill=True
+    # fetches every missing month.
+    RECENT_MONTHS_TO_FETCH = 4
+
     def run(self, backfill: bool = False) -> pd.DataFrame:
-        """Override run to fill gaps from Tableau after PDF parsing."""
+        """Override run to top up recent months from the KHRC Tableau viz.
+
+        KHRC stopped publishing the per-month PDFs, so super().run() (PDF path)
+        usually returns nothing now and the recent months live only in Tableau.
+        We therefore derive coverage from the ON-DISK CSV (the authoritative
+        history) rather than this run's fresh parse, fetch only the genuinely
+        missing recent months, and MERGE onto the existing data — never rebuild
+        the file from Tableau alone (that would drop PDF-sourced history and risk
+        losing months if a Tableau fetch partially fails).
+        """
+        from pipeline.run_sidecar import write_sidecar, now_iso
+        started_at = now_iso()
         result = super().run(backfill=backfill)
 
-        # Determine months covered by PDFs
-        covered_months = set()
-        if not result.empty:
-            covered_months = set(
-                pd.to_datetime(result["period_end"]).dt.strftime("%Y-%m").unique()
+        output_path = Path("data/processed") / f"{self.state_code}.csv"
+
+        def _latest_period(path: Path) -> str | None:
+            try:
+                col = pd.read_csv(path, usecols=["period_end"])["period_end"]
+                return str(pd.to_datetime(col, errors="coerce").max().date())
+            except Exception:
+                return None
+
+        def _finalize(status: str, rows_total: int, rows_new: int) -> None:
+            # The PDF path 404s (KHRC removed the report PDFs), so base run()
+            # always writes status=failed. Rewrite the sidecar to reflect the
+            # real Tableau outcome — otherwise the notifier alerts on a phantom
+            # failure every run. See feedback_scraper_override_sidecar.
+            write_sidecar(
+                self.state_code, status=status, started_at=started_at,
+                rows_total=rows_total, rows_new=rows_new,
+                period_latest=_latest_period(output_path) if output_path.exists() else None,
+                period_type="monthly",
+                metadata={"source": "tableau", "pdf_path_defunct": True},
             )
 
-        # Determine all expected months from launch to ~2 months ago
+        # Authoritative history = the on-disk CSV (preserved even when the PDF
+        # path fails), unioned with anything this run freshly parsed.
+        existing = None
+        covered_months = set()
+        if output_path.exists():
+            try:
+                existing = pd.read_csv(output_path, low_memory=False)
+                if not existing.empty:
+                    covered_months |= set(
+                        pd.to_datetime(existing["period_end"], errors="coerce")
+                        .dropna().dt.strftime("%Y-%m").unique()
+                    )
+            except Exception as e:
+                self.logger.warning(f"  Could not read existing KY CSV: {e}")
+        if not result.empty:
+            covered_months |= set(
+                pd.to_datetime(result["period_end"], errors="coerce")
+                .dropna().dt.strftime("%Y-%m").unique()
+            )
+        prior_total = len(existing) if existing is not None else 0
+
+        # All months from launch through the current month, minus covered.
         today = date.today()
         expected = []
         y, m = 2023, 9  # KY launched Sep 2023
         while True:
-            last_day = calendar.monthrange(y, m)[1]
-            pe = date(y, m, last_day)
-            # Reports typically lag ~2 months
+            pe = date(y, m, calendar.monthrange(y, m)[1])
             if pe > today:
                 break
-            key = f"{y}-{m:02d}"
-            if key not in covered_months:
+            if f"{y}-{m:02d}" not in covered_months:
                 expected.append((y, m))
             m += 1
             if m > 12:
-                m = 1
-                y += 1
+                m, y = 1, y + 1
 
         if not expected:
-            self.logger.info("  No Tableau gap-fill needed — PDFs cover all months")
+            self.logger.info("  KY: all months covered — no Tableau fetch needed")
+            _finalize("no_new_data", prior_total, 0)
             return result
 
-        self.logger.info(f"  {len(expected)} months not in PDFs — fetching from Tableau")
+        if not backfill and len(expected) > self.RECENT_MONTHS_TO_FETCH:
+            expected = expected[-self.RECENT_MONTHS_TO_FETCH:]
+        self.logger.info(
+            f"  KY: fetching {len(expected)} month(s) from Tableau: "
+            f"{', '.join(f'{y}-{m:02d}' for y, m in expected)}"
+        )
 
-        # Fetch missing months from Tableau (screenshot → OCR → parse)
         tableau_rows = self._fetch_tableau_months(expected)
         if not tableau_rows:
+            self.logger.info("  KY: Tableau returned no new rows")
+            _finalize("no_new_data", prior_total, 0)
             return result
 
         df = pd.DataFrame(tableau_rows)
         df["period_end"] = pd.to_datetime(df["period_end"])
         df["period_start"] = df["period_end"].apply(lambda d: d.replace(day=1))
 
-        # Normalize each month
         normalized = []
         for pe, group in df.groupby("period_end"):
             period_info = {"period_end": pe, "period_type": "monthly"}
-            normed = self._apply_normalization(group.copy(), period_info, Path("tableau"))
-            normalized.append(normed)
-
+            normalized.append(
+                self._apply_normalization(group.copy(), period_info, Path("tableau"))
+            )
         tableau_df = pd.concat(normalized, ignore_index=True)
-        new_months = tableau_df["period_end"].dt.strftime("%Y-%m").nunique()
         self.logger.info(
-            f"  Tableau: {len(tableau_df)} rows across {new_months} months"
+            f"  KY: Tableau yielded {len(tableau_df)} rows across "
+            f"{tableau_df['period_end'].dt.strftime('%Y-%m').nunique()} month(s)"
         )
 
-        result = pd.concat([result, tableau_df], ignore_index=True)
+        # Merge onto the best available history (existing CSV, else this run's
+        # result), then dedup so a re-fetched month replaces its stale rows.
+        base = existing if existing is not None and not existing.empty else result
+        merged = pd.concat([base, tableau_df], ignore_index=True)
 
-        # Normalize date columns to YYYY-MM-DD (the Tableau path produces
-        # pandas datetimes which would otherwise mix with the string dates
-        # already in the CSV from the PDF path).
-        for col in ('period_start', 'period_end'):
-            if col in result.columns:
-                result[col] = pd.to_datetime(result[col], errors='coerce').dt.strftime('%Y-%m-%d')
+        for col in ("period_start", "period_end"):
+            if col in merged.columns:
+                merged[col] = pd.to_datetime(
+                    merged[col], errors="coerce"
+                ).dt.strftime("%Y-%m-%d")
 
-        # Re-save
-        processed_dir = Path("data/processed")
-        output_path = processed_dir / f"{self.state_code}.csv"
-        result.to_csv(output_path, index=False)
-        self.logger.info(f"Re-saved with Tableau data: {len(result)} total rows")
+        dedup_keys = [c for c in ("state_code", "period_end", "channel",
+                                  "operator_reported", "operator_raw")
+                      if c in merged.columns]
+        if dedup_keys:
+            merged = merged.drop_duplicates(subset=dedup_keys, keep="last")
 
-        return result
+        merged.to_csv(output_path, index=False)
+        self.logger.info(f"  KY: saved {len(merged)} total rows to {output_path}")
+
+        rows_new = max(0, len(merged) - prior_total)
+        _finalize("ok" if rows_new else "no_new_data", len(merged), rows_new)
+
+        return merged
 
     # ------------------------------------------------------------------
-    # Tableau automated pipeline: screenshot → OCR → parse
+    # Tableau automated pipeline: headless browser -> bootstrapSession JSON
     # ------------------------------------------------------------------
+    # The previous implementation screenshotted the rendered viz and OCR'd it,
+    # which hung for minutes on the VPS and produced noisy values. Tableau Public
+    # now sits behind an AWS WAF JS challenge, and the embed page no longer ships
+    # the session config statically. So we use Playwright ONLY to clear the WAF
+    # challenge and obtain the live session, then read the exact data from the
+    # `bootstrapSession` network response (parsed via tableauscraper). All waits
+    # are bounded so the step can never hang indefinitely.
 
     def _fetch_tableau_months(self, months: list[tuple[int, int]]) -> list[dict]:
-        """
-        For each (year, month), load the KHRC Tableau dashboard with that
-        month's filter, screenshot the page, OCR it, and parse the data.
-        Caches screenshots in data/raw/KY/tableau/ to avoid re-fetching.
-        """
+        """Fetch per-operator data for the given (year, month) list from the
+        KHRC Tableau Public viz via the bootstrapSession JSON API."""
         try:
             from playwright.sync_api import sync_playwright
-            import pytesseract
-            from PIL import Image
         except ImportError as e:
             self.logger.warning(
-                f"  Cannot fetch Tableau data — missing dependency: {e}. "
-                f"Install with: pip install playwright pytesseract Pillow && playwright install chromium"
+                f"  Cannot fetch Tableau data — Playwright missing: {e}. "
+                f"Install with: pip install playwright && playwright install chromium"
+            )
+            return []
+        try:
+            from tableauscraper import TableauScraper, utils as ts_utils
+        except ImportError as e:
+            self.logger.warning(
+                f"  Cannot fetch Tableau data — tableauscraper missing: {e}. "
+                f"Install with: pip install TableauScraper"
             )
             return []
 
-        cache_dir = self.raw_dir / "tableau"
-        cache_dir.mkdir(exist_ok=True)
-
         all_rows = []
-        months_to_screenshot = []
-
-        # Check cache first — parse any cached screenshots
-        for y, m in months:
-            png_path = cache_dir / f"KY_{y}_{m:02d}.png"
-            if png_path.exists() and png_path.stat().st_size > 10000:
-                rows = self._ocr_and_parse_screenshot(png_path, y, m)
-                if rows:
-                    all_rows.extend(rows)
-                    continue
-            months_to_screenshot.append((y, m))
-
-        if not months_to_screenshot:
-            return all_rows
-
-        # Screenshot missing months via Playwright
-        self.logger.info(
-            f"  Screenshotting {len(months_to_screenshot)} months from Tableau..."
-        )
-
-        # Facility names that appear as DOM text once the Tableau viz has
-        # actually rendered. We wait for any one of these to show up before
-        # firing the screenshot — the 8s fixed timeout was insufficient on
-        # the VPS and produced blank captures.
-        facility_names = [
-            'Cumberland Run', 'Ellis Park', 'Kentucky Downs', 'Oak Grove',
-            'Red Mile', "Sandy's", 'Turfway Park', 'Churchill Downs',
-        ]
-        # Build a JS expression that returns true if body text contains any
-        # known facility name. Single-quoted JS string literals; "Sandy's"
-        # is escaped with a backslash.
-        js_names = ", ".join(
-            "'" + name.replace("'", "\\'") + "'" for name in facility_names
-        )
-        wait_expr = (
-            "() => { const t = document.body && document.body.innerText || ''; "
-            f"const names = [{js_names}]; "
-            "return names.some(n => t.includes(n)); }"
-        )
-
+        boot_holder: dict = {}
         try:
             with sync_playwright() as pw:
                 browser = pw.chromium.launch(headless=True)
-                page = browser.new_page(viewport={"width": 1400, "height": 900})
+                ctx = browser.new_context(
+                    viewport={"width": 1400, "height": 1000},
+                    user_agent=USER_AGENT,
+                )
+                page = ctx.new_page()
 
-                for y, m in months_to_screenshot:
-                    png_path = cache_dir / f"KY_{y}_{m:02d}.png"
-                    url = (
-                        f"{self.TABLEAU_BASE}"
-                        f"&YEAR(Reporting%20Period)={y}"
-                        f"&MONTH(Reporting%20Period)={m}"
-                    )
-
-                    # Up to 3 attempts per month — escalating extra wait if
-                    # OCR yields zero rows. We screenshot to a tmp path first
-                    # and only promote to the cache path on success, so a
-                    # failed run won't poison the cache for next time.
-                    tmp_path = cache_dir / f"KY_{y}_{m:02d}.tmp.png"
-                    extra_waits_ms = [0, 15000, 25000]
-                    rows = []
-                    last_attempt_ok = False
-
-                    for attempt, extra_wait in enumerate(extra_waits_ms, start=1):
+                def on_response(resp):
+                    # Capture the data payload for the current navigation.
+                    if "bootstrapSession" in resp.url:
                         try:
-                            page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                            # Wait for the viz to populate with at least one
-                            # known facility name before screenshotting. If
-                            # the wait times out, fall through and let the
-                            # validation step reject the result.
-                            try:
-                                page.wait_for_function(wait_expr, timeout=60000)
-                            except Exception as wait_err:
-                                self.logger.warning(
-                                    f"  Tableau viz did not render facility names for "
-                                    f"{y}-{m:02d} (attempt {attempt}): {wait_err}"
-                                )
-                            if extra_wait:
-                                page.wait_for_timeout(extra_wait)
-                            page.screenshot(path=str(tmp_path), full_page=True)
+                            boot_holder["body"] = resp.body()
+                        except Exception:
+                            pass
 
-                            rows = self._ocr_and_parse_screenshot(tmp_path, y, m)
-                            if rows:
-                                # Promote tmp → cache only when valid.
-                                tmp_path.replace(png_path)
-                                self.logger.info(
-                                    f"  Captured: {png_path.name} (attempt {attempt})"
-                                )
-                                last_attempt_ok = True
-                                break
-                            else:
-                                self.logger.warning(
-                                    f"  No data parsed from {y}-{m:02d} screenshot "
-                                    f"(attempt {attempt}/{len(extra_waits_ms)}); retrying..."
-                                )
-                                if attempt < len(extra_waits_ms):
-                                    page.wait_for_timeout(5000)
-                        except Exception as e:
-                            self.logger.warning(
-                                f"  Tableau screenshot failed for {y}-{m:02d} "
-                                f"(attempt {attempt}): {e}"
-                            )
-                            if attempt < len(extra_waits_ms):
-                                page.wait_for_timeout(5000)
+                page.on("response", on_response)
 
-                    # Clean up tmp file if it's still around (failed run).
+                for (y, m) in months:
+                    boot_holder.pop("body", None)
                     try:
-                        if tmp_path.exists():
-                            tmp_path.unlink()
-                    except Exception:
-                        pass
-
-                    if last_attempt_ok and rows:
+                        rows = self._fetch_tableau_month(
+                            page, boot_holder, y, m, TableauScraper, ts_utils
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"  Tableau {y}-{m:02d} failed: {e}")
+                        rows = []
+                    if rows:
                         all_rows.extend(rows)
+                        self.logger.info(
+                            f"  Tableau {y}-{m:02d}: {len(rows)} operator rows"
+                        )
                     else:
                         self.logger.warning(
-                            f"  Failed to capture valid Tableau screenshot for "
-                            f"{y}-{m:02d} after {len(extra_waits_ms)} attempts; "
-                            f"not caching — will retry on next run."
+                            f"  Tableau {y}-{m:02d}: no data (not published yet?)"
                         )
 
                 browser.close()
         except Exception as e:
-            self.logger.error(f"  Playwright error: {e}")
+            self.logger.error(f"  Playwright/Tableau error: {e}")
 
         return all_rows
 
-    def _ocr_and_parse_screenshot(
-        self, png_path: Path, year: int, month: int
+    def _fetch_tableau_month(
+        self, page, boot_holder, year, month, TableauScraper, ts_utils
     ) -> list[dict]:
-        """OCR a Tableau screenshot and parse operator-level data."""
-        import pytesseract
-        from PIL import Image
+        """Navigate the month-filtered viz, capture its bootstrapSession JSON,
+        and parse it into per-operator rows. All waits bounded to <=45s."""
+        url = (
+            f"{self.TABLEAU_BASE}"
+            f"&YEAR(Reporting%20Period)={year}"
+            f"&MONTH(Reporting%20Period)={month}"
+        )
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        # The SPA fills #tsConfigContainer once the WAF challenge clears and the
+        # viz session is created — that's our "ready" signal.
+        page.wait_for_function(
+            "() => { const t = document.getElementById('tsConfigContainer'); "
+            "return t && t.value && t.value.length > 50; }",
+            timeout=45000,
+        )
+        # Give the bootstrapSession response a moment to land.
+        page.wait_for_timeout(3000)
 
-        img = Image.open(png_path)
-        text = pytesseract.image_to_string(img, config="--psm 6")
+        cfg_raw = page.evaluate(
+            "() => { const t = document.getElementById('tsConfigContainer'); "
+            "return t ? t.value : null; }"
+        )
+        boot = boot_holder.get("body")
+        if not cfg_raw or not boot:
+            return []
 
-        return self._parse_tableau_text(text, year, month)
+        ts = TableauScraper()
+        ts.host = "https://public.tableau.com"
+        ts.tableauData = json.loads(cfg_raw)
 
-    def _parse_tableau_text(self, text: str, year: int, month: int) -> list[dict]:
-        """
-        Parse OCR'd Tableau text into operator-level rows.
-        Expected format per channel section:
-          Online
-          Wagers  Winnings  Federal Excise Tax Paid  Adjusted Gross Revenue  Kentucky Excise Tax
-          Facility Operator $wagers $winnings $fed_tax $agr $ky_tax
-          ...
-          Grand Total $... $... $... $... $...
-          Retail
-          (same structure)
+        text = boot.decode("utf-8", "replace")
+        # The bootstrap payload is two length-prefixed JSON blobs: "<n>;{..}<n>;{..}"
+        m = re.search(r"\d+;({.*})\d+;({.*})", text, re.DOTALL)
+        if not m:
+            return []
+        ts.info = json.loads(m.group(1))
+        ts.data = json.loads(m.group(2))
+        pres = ts.data["secondaryInfo"]["presModelMap"]
+        # A month with no published data returns a bootstrap with no data
+        # dictionary — treat that as "nothing to extract", not an error.
+        if "dataDictionary" not in pres:
+            return []
+        ts.dataSegments = pres["dataDictionary"]["presModelHolder"][
+            "genDataDictionaryPresModel"
+        ]["dataSegments"]
+        ts.dashboard = ts.info["sheetName"]
+        ts.filters = ts_utils.getFiltersForAllWorksheet(
+            ts.logger, ts.data, ts.info, rootDashboard=ts.dashboard
+        )
+
+        wb = ts.getWorkbook()
+        return self._extract_tableau_rows(wb, year, month)
+
+    def _extract_tableau_rows(self, wb, year: int, month: int) -> list[dict]:
+        """Turn parsed Tableau worksheets into our per-operator row dicts.
+
+        The viz has an 'Online - All' and a 'Retail - All' worksheet, each with
+        one row per (venue, licensee, measure). 'Name of Operator' is the venue
+        and 'Name of Licensee' is the sportsbook brand. We build
+        operator_raw = "<venue> (<licensee>)" so the existing operator mapping
+        resolves it the same way the OCR rows did. Money is left in DOLLARS;
+        base_scraper._apply_normalization converts to cents.
         """
         last_day = calendar.monthrange(year, month)[1]
         period_end = str(date(year, month, last_day))
 
-        known_facilities = [
-            'Cumberland Run', 'Ellis Park', 'Kentucky Downs', 'Oak Grove',
-            'Red Mile', "Sandy's", 'Turfway Park', 'Churchill Downs'
-        ]
+        needed = {
+            "Name of Operator-alias", "Name of Licensee-alias",
+            "Measure Names-alias", "Measure Values-alias",
+        }
 
-        def find_dollars(line):
-            return re.findall(r'\(\$[\d,]+(?:\.\d+)?\)|\$[\d,]+(?:\.\d+)?', line)
-
-        def parse_money(s):
-            neg = s.startswith('(') or s.startswith('($')
-            s = s.replace('$', '').replace(',', '').replace('(', '').replace(')', '')
-            try:
-                v = float(s)
-                return -v if neg else v
-            except ValueError:
-                return 0.0
+        agg: dict = {}
+        order: list = []
+        for ws in wb.worksheets:
+            if ws.name.startswith("Online"):
+                channel = "online"
+            elif ws.name.startswith("Retail"):
+                channel = "retail"
+            else:
+                continue
+            df = ws.data
+            if df is None or df.empty or not needed.issubset(df.columns):
+                continue
+            for _, row in df.iterrows():
+                venue = str(row["Name of Operator-alias"]).strip()
+                licensee = str(row["Name of Licensee-alias"]).strip()
+                if venue in ("%all%", "", "nan") or licensee in ("%all%", "", "nan"):
+                    continue
+                field = self.TABLEAU_MEASURES.get(row["Measure Names-alias"])
+                if not field:
+                    continue
+                key = (channel, venue, licensee)
+                if key not in agg:
+                    agg[key] = {}
+                    order.append(key)
+                agg[key][field] = self._parse_money(row["Measure Values-alias"])
 
         rows = []
-        current_channel = None
-
-        for line in text.splitlines():
-            line = line.strip()
-
-            if line == 'Online':
-                current_channel = 'online'
-                continue
-            elif line == 'Retail':
-                current_channel = 'retail'
-                continue
-
-            if not current_channel:
-                continue
-
-            if line.startswith(('Wagers', 'Glossary', 'Data is', '**',
-                                'Bird', 'Grand Total', '=', 'View on')) or not line:
-                continue
-
-            dollars = find_dollars(line)
-            if len(dollars) < 3:
-                continue
-
-            name_part = re.split(r'[\$\(]', line)[0].strip()
-
-            facility = None
-            operator = name_part
-            for fac in known_facilities:
-                if name_part.startswith(fac):
-                    facility = fac
-                    operator = name_part[len(fac):].strip().rstrip(',')
-                    break
-
-            if not operator:
-                operator = facility or 'Unknown'
-
-            raw_name = (
-                f"{facility} ({operator})"
-                if facility and facility != operator
-                else operator
+        for key in order:
+            channel, venue, licensee = key
+            f = agg[key]
+            handle = f.get("handle")
+            payouts = f.get("payouts")
+            gross = (handle - payouts) if (handle is not None and payouts is not None) else None
+            raw_line = (
+                f"{venue} / {licensee} | Handle={f.get('handle')} "
+                f"Winnings={f.get('payouts')} AGR={f.get('net_revenue')} "
+                f"KYTax={f.get('tax_paid')} FedTax={f.get('federal_excise_tax')}"
             )
-
-            wagers = parse_money(dollars[0])
-            winnings = parse_money(dollars[1])
-            fed_tax = parse_money(dollars[2])
-            agr = parse_money(dollars[3]) if len(dollars) > 3 else None
-            ky_tax = parse_money(dollars[4]) if len(dollars) > 4 else None
-
             rows.append({
                 "period_end": period_end,
                 "period_type": "monthly",
-                "operator_raw": raw_name,
-                "channel": current_channel,
-                "handle": wagers,
-                "payouts": winnings,
-                "gross_revenue": wagers - winnings if wagers and winnings else None,
-                "net_revenue": agr,
-                "federal_excise_tax": fed_tax,
-                "tax_paid": ky_tax,
-                "source_file": f"KY_{year}_{month:02d}.png",
+                "operator_raw": f"{venue} ({licensee})",
+                "channel": channel,
+                "handle": handle,
+                "payouts": payouts,
+                "gross_revenue": gross,
+                "net_revenue": f.get("net_revenue"),
+                "federal_excise_tax": f.get("federal_excise_tax"),
+                "tax_paid": f.get("tax_paid"),
+                "source_file": f"KY_{year}_{month:02d}_tableau",
                 "source_url": self.TABLEAU_BASE,
-                "source_raw_line": line,
+                "source_raw_line": raw_line,
             })
-
         return rows
 
     def discover_periods(self) -> list[dict]:

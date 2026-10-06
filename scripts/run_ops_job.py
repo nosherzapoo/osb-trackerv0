@@ -24,6 +24,7 @@ output at end-of-run and stuffs it into ops.jobs.output_tail.
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
 import uuid
@@ -90,7 +91,23 @@ def run_pipeline(states: list[str], backfill: bool, run_type: str, triggered_by:
     if backfill:
         args.append("--backfill")
     args.extend(states)
-    rc_run = subprocess.run(args, cwd=REPO, env=env).returncode
+    # Hard per-job timeout so a hung Playwright session can't pin the (1-core)
+    # VPS forever (a stuck NY scrape ran 3+ days on 2026-06-29 before this).
+    # 25 min/state, min 30 min. start_new_session so we can SIGKILL the whole
+    # process group on timeout — subprocess timeout alone leaks node+chrome.
+    scrape_timeout_s = max(1800, 1500 * len(states))
+    proc_run = subprocess.Popen(args, cwd=REPO, env=env, start_new_session=True)
+    try:
+        rc_run = proc_run.wait(timeout=scrape_timeout_s)
+    except subprocess.TimeoutExpired:
+        print(f"run_states TIMEOUT after {scrape_timeout_s}s for {states} — "
+              f"killing process group", flush=True)
+        try:
+            os.killpg(os.getpgid(proc_run.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+        proc_run.wait()
+        rc_run = 124
 
     # 3) downstream pipeline (best-effort)
     for cmd in (

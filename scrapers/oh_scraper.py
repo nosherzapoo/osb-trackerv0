@@ -45,9 +45,11 @@ MONTH_NAMES_MAP = {
     "september": 9, "october": 10, "november": 11, "december": 12
 }
 
-# Column x-boundaries (from PDF word coordinate analysis)
-# name: x<310, handle: 310-400, winnings: 400-480, voided: 480-560,
-# promo: 560-630, revenue: 630-680, taxable: 680+
+# Static fallback column x-boundaries (used only if the header row can't be
+# parsed). The live parser derives boundaries per-page from the header row —
+# see _column_rights_from_header — because OH's PDF width has drifted year to
+# year (2024 ~800px, 2026 ~1024px), and hardcoded bounds silently misbin every
+# value into the wrong column (handle/revenue -> NaN).
 COL_BOUNDS = [
     ("name", 0, 310),
     ("handle", 310, 400),
@@ -58,10 +60,24 @@ COL_BOUNDS = [
     ("taxable", 680, 800),
 ]
 
+# The six numeric columns, left to right. Each is anchored on its header
+# label's horizontal center. OH renders large numbers with an internal space,
+# so pdfplumber splits e.g. "52,991,707" into "5" + "2,991,707"; the leading
+# fragment sits at the LEFT of its cell. Binning by right edge misfiles it into
+# the previous column (dropping tens of millions), so we assign each fragment
+# to the nearest column center, which is robust to those split leading digits.
+NUMERIC_COLS = ["handle", "winnings", "voided", "promo", "revenue", "taxable"]
+
 
 class OHScraper(BaseStateScraper):
     def __init__(self):
         super().__init__("OH")
+        # Ohio grants market access per casino, so one brand can run two skins
+        # in the same month (e.g. BetMGM at Cincinnati Reds + MGM Northfield
+        # Park; FanDuel at Belterra Park + Hollywood Mahoning Valley during a
+        # migration). These share an operator_reported but are distinct revenue
+        # lines that must both be kept — dedup on operator_raw to preserve them.
+        self.dedupe_extra_keys = ['operator_raw']
 
     def discover_periods(self) -> list[dict]:
         """Discover sports gaming revenue PDF URLs from the OH revenue page."""
@@ -175,6 +191,21 @@ class OHScraper(BaseStateScraper):
                 y_key = round(w['top'] / 2) * 2
                 rows_by_y[y_key].append(w)
 
+            # Derive numeric column boundaries from this page's header row.
+            # OH's PDF layout width drifts between years, so static x-bounds
+            # silently misbin values — see _column_rights_from_header.
+            col_header = None
+            for y_key in sorted(rows_by_y.keys()):
+                cr = self._column_centers_from_header(rows_by_y[y_key])
+                if cr:
+                    col_header = cr
+                    break
+            if col_header is None:
+                self.logger.warning(
+                    f"  Header row not found on page {page.page_number} "
+                    f"({period_end}); falling back to static column bounds"
+                )
+
             current_section = None
 
             for y_key in sorted(rows_by_y.keys()):
@@ -200,20 +231,12 @@ class OHScraper(BaseStateScraper):
                                                       '*PROMOTIONAL']):
                     continue
 
-                # Assign words to columns by x-coordinate
-                col_values = {col: [] for col, _, _ in COL_BOUNDS}
-                for w in row_words:
-                    x_mid = (w['x0'] + w['x1']) / 2
-                    for col_name, x_min, x_max in COL_BOUNDS:
-                        if x_min <= x_mid < x_max:
-                            col_values[col_name].append(w['text'])
-                            break
-
-                # Build operator name
-                name_parts = col_values["name"]
-                if not name_parts:
+                # Assign words to columns (dynamic header-derived bounds, with
+                # static fallback), and reconstruct the operator name.
+                operator_name, col_values = self._assign_columns(
+                    row_words, col_header)
+                if not operator_name:
                     continue
-                operator_name = " ".join(name_parts).strip()
 
                 # Skip all-dash rows (no data for this operator)
                 data_cols = ["handle", "winnings", "voided", "promo", "revenue", "taxable"]
@@ -260,6 +283,90 @@ class OHScraper(BaseStateScraper):
         if screenshot_path:
             result["source_screenshot"] = screenshot_path
         return result
+
+    def _column_centers_from_header(self, row_words: list) -> dict | None:
+        """Derive per-column center x-coordinates from a table header row.
+
+        The header reads: Total Gross Receipts | (-) Winnings Paid |
+        (-) Voided Wagers | Promotional* | Revenue | Taxable Revenue.
+        Each numeric column's center is the midpoint of its label span; the
+        name/number split point ('name_cutoff') is the left edge of 'Total'.
+        Returns None if the row isn't a recognizable header.
+        """
+        by_text = defaultdict(list)
+        for w in row_words:
+            by_text[w["text"]].append(w)
+
+        def tok(text):
+            hits = by_text.get(text)
+            return hits[0] if hits else None
+
+        total = tok("Total")
+        receipts = tok("Receipts")
+        winnings = tok("Winnings")
+        paid = tok("Paid")
+        voided = tok("Voided")
+        wagers = tok("Wagers")
+        promo = next((w for w in row_words
+                      if w["text"].startswith("Promotional")), None)
+        taxable = tok("Taxable")
+        revenues = sorted(by_text.get("Revenue", []), key=lambda w: w["x0"])
+
+        if not all([total, receipts, winnings, paid, voided, wagers, promo,
+                    taxable]) or len(revenues) < 2:
+            return None
+
+        rev_before = [w for w in revenues if w["x0"] < taxable["x0"]]
+        rev_after = [w for w in revenues if w["x0"] > taxable["x0"]]
+        if not rev_before or not rev_after:
+            return None
+
+        def center(a, b):
+            return (a["x0"] + b["x1"]) / 2
+
+        return {
+            "name_cutoff": total["x0"],
+            "centers": {
+                "handle": center(total, receipts),
+                "winnings": center(winnings, paid),
+                "voided": center(voided, wagers),
+                "promo": center(promo, promo),
+                "revenue": center(rev_before[-1], rev_before[-1]),
+                "taxable": center(taxable, rev_after[-1]),
+            },
+        }
+
+    def _assign_columns(self, row_words: list, header: dict | None):
+        """Split a data row into (operator_name, {col: [fragments]}).
+
+        With dynamic header info, assigns each numeric fragment to the nearest
+        column center (robust to OH's split leading digits). Falls back to the
+        static COL_BOUNDS table if the header couldn't be parsed.
+        """
+        if header:
+            name_cutoff = header["name_cutoff"]
+            centers = header["centers"]
+            col_values = {c: [] for c in NUMERIC_COLS}
+            name_parts = []
+            for w in sorted(row_words, key=lambda w: w["x0"]):
+                if w["x1"] < name_cutoff:
+                    name_parts.append(w["text"])
+                    continue
+                x_mid = (w["x0"] + w["x1"]) / 2
+                nearest = min(NUMERIC_COLS,
+                              key=lambda c: abs(x_mid - centers[c]))
+                col_values[nearest].append(w["text"])
+            return " ".join(name_parts).strip(), col_values
+
+        # Static fallback
+        col_values = {col: [] for col, _, _ in COL_BOUNDS}
+        for w in sorted(row_words, key=lambda w: w["x0"]):
+            x_mid = (w["x0"] + w["x1"]) / 2
+            for col_name, x_min, x_max in COL_BOUNDS:
+                if x_min <= x_mid < x_max:
+                    col_values[col_name].append(w["text"])
+                    break
+        return " ".join(col_values["name"]).strip(), col_values
 
     def _parse_col_value(self, word_parts: list) -> float | None:
         """Parse a column value from word fragments (e.g., ['3', '18,807,656'] -> 318807656)."""

@@ -855,9 +855,15 @@ class BaseStateScraper(ABC):
                 self.logger.warning(f"Removing {len(future)} rows with future dates")
                 df.drop(future.index, inplace=True)
 
-        # Duplicates — prefer source file rows over aggregated ones
+        # Duplicates — prefer source file rows over aggregated ones.
+        # Scrapers may opt into extra key columns (e.g. OH sets
+        # dedupe_extra_keys=['operator_raw']) where one brand runs multiple
+        # casino skins in a month that share an operator_reported but are
+        # genuinely distinct source rows and must not be collapsed.
         key_cols = ['state_code', 'period_end', 'operator_reported', 'channel',
                     'sport_category', 'period_type']
+        key_cols += [c for c in getattr(self, 'dedupe_extra_keys', [])
+                     if c not in key_cols]
         existing_cols = [c for c in key_cols if c in df.columns]
         dupes = df[df.duplicated(subset=existing_cols, keep=False)]
         if len(dupes) > 0:

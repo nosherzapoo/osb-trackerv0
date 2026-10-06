@@ -375,11 +375,422 @@ def _write_coverage_matrix(writer, grouped, months):
     ws.freeze_panes = 'B5'
 
 
-def main():
-    frames = [load_state(st) for st in OPERATOR_STATES]
-    raw = pd.concat(frames, ignore_index=True)
+def _write_by_state_panel(writer, grouped, brands, months, sheet_name, label,
+                          src_col, num_fmt='#,##0'):
+    """Pivoted Operator × State panel: brand subtotal row + collapsible state
+    sub-rows, month columns. Cells are SUMIFS into Raw Data where the state
+    reported that month, and left EMPTY otherwise (blank = did not report, so
+    the Like-for-Like Y/Y can gate on ISNUMBER). Helper columns B/C/E carry the
+    machine-readable Brand/State/Level for SUMPRODUCT and are hidden.
 
+    Returns a meta dict the Like-for-Like Y/Y writer uses to address the panel.
+    """
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = writer.book
+    ws = wb.create_sheet(sheet_name)
+
+    title_font = Font(bold=True, size=12)
+    section_font = Font(bold=True, color='FFFFFF')
+    section_fill = PatternFill('solid', fgColor='305496')
+    brand_font = Font(bold=True)
+    brand_fill = PatternFill('solid', fgColor='D9E1F2')
+    helper_font = Font(color='BFBFBF', size=8)
+
+    ws.cell(row=1, column=1, value=f'{label} — by Operator × State').font = title_font
+    ws.cell(row=2, column=1, value=(
+        'Brand subtotal rows (bold) with collapsible state rows beneath. '
+        'Blank = that state did not report that month. Linked to Raw Data via '
+        'SUMIFS; feeds the Like-for-Like Y/Y sheet.'
+    )).font = Font(italic=True, color='595959')
+
+    header_row = 4
+    first_data_row = 5
+    month_first_col = 6
+
+    for c_idx, title in enumerate(
+            ['Operator / State', 'Brand', 'State', 'Parent', 'Lvl'], start=1):
+        cell = ws.cell(row=header_row, column=c_idx, value=title)
+        cell.font = section_font
+        cell.fill = section_fill
+    for c_idx, m in enumerate(months, start=month_first_col):
+        cell = ws.cell(row=header_row, column=c_idx, value=m)
+        cell.font = section_font
+        cell.fill = section_fill
+        cell.alignment = Alignment(horizontal='center')
+        cell.number_format = 'mmm yyyy'
+
+    present = set(zip(grouped['state_code'], grouped['bucket'],
+                      grouped['period_start']))
+    parent_lookup = (
+        grouped.dropna(subset=['parent_company'])
+        .groupby(['state_code', 'bucket'])['parent_company']
+        .agg(lambda s: s.mode().iat[0] if not s.mode().empty else '')
+        .to_dict()
+    )
+
+    r = first_data_row
+    for brand in brands:
+        bstates = sorted({s for (s, b, _m) in present if b == brand})
+        if not bstates:
+            continue
+        bmonths = {mm for (_s, b, mm) in present if b == brand}
+
+        # Brand subtotal row (Lvl 0) — SUMIFS over all of the brand's rows.
+        ws.cell(row=r, column=1, value=brand).font = brand_font
+        ws.cell(row=r, column=1).fill = brand_fill
+        ws.cell(row=r, column=2, value=brand).font = helper_font
+        ws.cell(row=r, column=3, value='(all)').font = helper_font
+        ws.cell(row=r, column=4).fill = brand_fill
+        ws.cell(row=r, column=5, value=0).font = helper_font
+        for c_idx, m in enumerate(months, start=month_first_col):
+            cell = ws.cell(row=r, column=c_idx)
+            cell.fill = brand_fill
+            if m in bmonths:
+                mcol = _col_letter(c_idx)
+                cell.value = (
+                    f"=SUMIFS('Raw Data'!${src_col}:${src_col},"
+                    f"'Raw Data'!$B:$B,$B{r},'Raw Data'!$D:$D,{mcol}${header_row})"
+                )
+                cell.number_format = num_fmt
+                cell.font = brand_font
+        r += 1
+
+        # State sub-rows (Lvl 1) — grouped/collapsible under the brand.
+        for st in bstates:
+            smonths = {mm for (s, b, mm) in present if b == brand and s == st}
+            ws.cell(row=r, column=1, value=f'    {st}')
+            ws.cell(row=r, column=2, value=brand).font = helper_font
+            ws.cell(row=r, column=3, value=st).font = helper_font
+            ws.cell(row=r, column=4, value=parent_lookup.get((st, brand), ''))
+            ws.cell(row=r, column=5, value=1).font = helper_font
+            for c_idx, m in enumerate(months, start=month_first_col):
+                if m in smonths:
+                    mcol = _col_letter(c_idx)
+                    cell = ws.cell(row=r, column=c_idx, value=(
+                        f"=SUMIFS('Raw Data'!${src_col}:${src_col},"
+                        f"'Raw Data'!$A:$A,$C{r},'Raw Data'!$B:$B,$B{r},"
+                        f"'Raw Data'!$D:$D,{mcol}${header_row})"
+                    ))
+                    cell.number_format = num_fmt
+            ws.row_dimensions[r].outline_level = 1
+            r += 1
+
+    last_data_row = r - 1
+    ws.sheet_properties.outlinePr.summaryBelow = False
+    ws.column_dimensions['A'].width = 22
+    ws.column_dimensions['D'].width = 16
+    for col in ('B', 'C', 'E'):
+        ws.column_dimensions[col].hidden = True
+    for c_idx in range(month_first_col, month_first_col + len(months)):
+        ws.column_dimensions[_col_letter(c_idx)].width = 12
+    ws.freeze_panes = 'F5'
+
+    return {
+        'sheet': sheet_name, 'r1': first_data_row, 'r2': last_data_row,
+        'hdr': header_row, 'mfc': month_first_col,
+        'mlc': month_first_col + len(months) - 1,
+    }
+
+
+def _write_fair_yoy(writer, sheet_name, label, panel_meta, brands, months):
+    """Like-for-Like Y/Y: numerator = every state reporting the current month;
+    denominator = those same states a year ago (new states -> 0). Computed with
+    SUMPRODUCT over the by-state panel, gated on ISNUMBER(current column)."""
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = writer.book
+    ws = wb.create_sheet(sheet_name)
+
+    title_font = Font(bold=True, size=12)
+    section_font = Font(bold=True, color='FFFFFF')
+    section_fill = PatternFill('solid', fgColor='305496')
+    others_font = Font(italic=True)
+    total_font = Font(bold=True)
+    total_fill = PatternFill('solid', fgColor='D9E1F2')
+    header_font = Font(bold=True)
+
+    P = panel_meta['sheet']
+    r1, r2, hdr = panel_meta['r1'], panel_meta['r2'], panel_meta['hdr']
+    mfC = _col_letter(panel_meta['mfc'])
+    mlC = _col_letter(panel_meta['mlc'])
+
+    ws.cell(row=1, column=1, value=(
+        f'{label} — Like-for-Like (constant current-state panel)')).font = title_font
+    ws.cell(row=2, column=1, value=(
+        'Y/Y where the denominator is restricted to states that reported in the '
+        'CURRENT month; newly-reporting states are still included in the '
+        'numerator (numerator state-count ≥ denominator). SUMPRODUCT over the '
+        f'{P} sheet. Blank until a prior-year month exists.'
+    )).font = Font(italic=True, color='595959')
+
+    header_row = 4
+    ws.cell(row=header_row, column=1, value=label).font = section_font
+    ws.cell(row=header_row, column=1).fill = section_fill
+    for c_idx, m in enumerate(months, start=2):
+        cell = ws.cell(row=header_row, column=c_idx, value=m)
+        cell.font = section_font
+        cell.fill = section_fill
+        cell.alignment = Alignment(horizontal='center')
+        cell.number_format = 'mmm yyyy'
+
+    brand_rng = f"'{P}'!$B${r1}:$B${r2}"
+    lvl_rng = f"'{P}'!$E${r1}:$E${r2}"
+
+    # Each output month maps to an explicit current + prior-year panel column
+    # (the panel lists the same months in the same order from column `mfc`).
+    # Using fixed column letters avoids volatile INDEX/MATCH and is exact.
+    month_to_panel_col = {
+        (m.year, m.month): _col_letter(panel_meta['mfc'] + i)
+        for i, m in enumerate(months)
+    }
+
+    def panel_cols(m):
+        cur = month_to_panel_col[(m.year, m.month)]
+        prior = month_to_panel_col.get((m.year - 1, m.month))
+        return cur, prior
+
+    def col_rng(letter):
+        return f"'{P}'!${letter}${r1}:${letter}${r2}"
+
+    def yoy_formula(m, brand_filter):
+        cu_c, pr_c = panel_cols(m)
+        if pr_c is None:
+            return None
+        cu, pr = col_rng(cu_c), col_rng(pr_c)
+        num = f"SUMPRODUCT({brand_filter}({lvl_rng}=1)*ISNUMBER({cu})*{cu})"
+        den = f"SUMPRODUCT({brand_filter}({lvl_rng}=1)*ISNUMBER({cu})*{pr})"
+        return f"=IFERROR({num}/{den}-1,\"\")"
+
+    for r_idx, brand in enumerate(brands):
+        r = 5 + r_idx
+        ws.cell(row=r, column=1, value=brand).font = (
+            others_font if brand == 'Others' else header_font)
+        for c_idx, m in enumerate(months, start=2):
+            f = yoy_formula(m, f"({brand_rng}=$A{r})*")
+            if f is None:
+                continue
+            cell = ws.cell(row=r, column=c_idx, value=f)
+            cell.number_format = '0.0%'
+            if brand == 'Others':
+                cell.font = others_font
+
+    total_r = 5 + len(brands)
+    ws.cell(row=total_r, column=1, value='Total (US)').font = total_font
+    ws.cell(row=total_r, column=1).fill = total_fill
+    for c_idx, m in enumerate(months, start=2):
+        f = yoy_formula(m, "")
+        cell = ws.cell(row=total_r, column=c_idx)
+        cell.font = total_font
+        cell.fill = total_fill
+        if f is None:
+            continue
+        cell.value = f
+        cell.number_format = '0.0%'
+
+    # Diagnostics: operator×state cells in the numerator vs. matched in the
+    # denominator — makes the "numerator ≥ denominator" invariant visible.
+    diag = [
+        ('Reporting cells (num)',
+         "SUMPRODUCT(({lvl}=1)*ISNUMBER({cu}))"),
+        ('Matched prior cells (den)',
+         "SUMPRODUCT(({lvl}=1)*ISNUMBER({cu})*ISNUMBER({pr}))"),
+    ]
+    for d_idx, (dlabel, tmpl) in enumerate(diag):
+        r = total_r + 2 + d_idx
+        ws.cell(row=r, column=1, value=dlabel).font = Font(italic=True, color='595959')
+        for c_idx, m in enumerate(months, start=2):
+            cu_c, pr_c = panel_cols(m)
+            if pr_c is None:
+                continue
+            f = '=' + tmpl.format(lvl=lvl_rng, cu=col_rng(cu_c), pr=col_rng(pr_c))
+            cell = ws.cell(row=r, column=c_idx, value=f)
+            cell.number_format = '0'
+            cell.font = Font(italic=True, color='595959')
+
+    ws.column_dimensions['A'].width = 16
+    for c_idx in range(2, len(months) + 2):
+        ws.column_dimensions[_col_letter(c_idx)].width = 12
+    ws.freeze_panes = 'B5'
+
+
+def _quarter_start(ts):
+    ts = pd.Timestamp(ts)
+    return pd.Timestamp(ts.year, ((ts.month - 1) // 3) * 3 + 1, 1)
+
+
+def _quarter_label(qs):
+    return f"{(qs.month - 1) // 3 + 1}Q{qs.year % 100:02d}"
+
+
+def _write_quarterly_trends(writer, months, handle_panel, ggr_panel, brands, grouped):
+    """Quarterly roll-up (fully formula-driven): quarters as columns; stacked
+    Handle / GGR / Handle % Y/Y / GGR % Y/Y / Hold % sections, brand rows + Total.
+
+    Levels = SUM of the quarter's monthly cells on the Handle/GGR sheets. Y/Y is
+    Like-for-Like at the quarter level: (Σ over the quarter's reported months of
+    each month's constant-panel numerator) / (Σ of the same months' denominators)
+    − 1, via SUMPRODUCT over the by-state panels. This is month- AND state-matched,
+    so a partial trailing quarter (marked *) fairly compares only the slice
+    reported so far against the identical slice a year earlier. Hold = GGR/Handle.
+    """
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = writer.book
+    ws = wb.create_sheet('Quarterly Trends')
+
+    months = [pd.Timestamp(m) for m in months]
+    midx = {(m.year, m.month): i for i, m in enumerate(months)}
+    months_set = set(midx)
+
+    g = grouped.copy()
+    g['period_start'] = pd.to_datetime(g['period_start'])
+    mcov = g.groupby('period_start')['state_code'].nunique()
+    last_solid = mcov[mcov >= 0.8 * mcov.max()].index.max()
+
+    def q_ym(qs):
+        return [(qs.year, qs.month + k) for k in range(3)]
+
+    def complete(qs):
+        return all(ym in months_set and pd.Timestamp(ym[0], ym[1], 1) <= last_solid
+                   for ym in q_ym(qs))
+
+    all_q = sorted({_quarter_start(m) for m in months})
+    comp = [qs for qs in all_q if complete(qs)]
+    shown = list(comp)
+    if comp:
+        # Also show trailing (still-reporting) quarters after the last complete
+        # one, marked partial — this is where "add Q2" comes in.
+        last_c = max(comp)
+        shown += [qs for qs in all_q
+                  if qs > last_c and any(ym in months_set for ym in q_ym(qs))]
+    shown = sorted(set(shown))
+
+    # Monthly Handle/GGR sheet geometry (see _write_dollar_sheet): header row 4,
+    # brand rows from 5, then Others, Total. Months from column B.
+    mrow = {b: 5 + i for i, b in enumerate(brands)}
+    mrow['Others'] = 5 + len(brands)
+    mrow['Total'] = 5 + len(brands) + 1
+
+    def mcol(ym):
+        return _col_letter(2 + midx[ym])
+
+    def level_formula(metric_sheet, brand, qs):
+        yms = [ym for ym in q_ym(qs) if ym in months_set]
+        cells = ",".join(f"'{metric_sheet}'!{mcol(ym)}{mrow[brand]}" for ym in yms)
+        return f'=IF(SUM({cells})=0,"",SUM({cells}))'
+
+    def yoy_formula(pm, brand, qs, brand_row):
+        r1, r2, S = pm['r1'], pm['r2'], pm['sheet']
+        lvl = f"'{S}'!$E${r1}:$E${r2}"
+        bf = "" if brand == 'Total' else f"('{S}'!$B${r1}:$B${r2}=$A{brand_row})*"
+        yms = [ym for ym in q_ym(qs)
+               if ym in months_set and (ym[0] - 1, ym[1]) in months_set]
+        if not yms:
+            return None
+
+        def rng(ym):
+            return f"'{S}'!${_col_letter(pm['mfc'] + midx[ym])}${r1}:${_col_letter(pm['mfc'] + midx[ym])}${r2}"
+        num = "+".join(
+            f"SUMPRODUCT({bf}({lvl}=1)*ISNUMBER({rng(ym)})*{rng(ym)})" for ym in yms)
+        den = "+".join(
+            f"SUMPRODUCT({bf}({lvl}=1)*ISNUMBER({rng(ym)})*{rng((ym[0]-1, ym[1]))})"
+            for ym in yms)
+        return f'=IFERROR(({num})/({den})-1,"")'
+
+    title_font = Font(bold=True, size=12)
+    section_font = Font(bold=True, color='FFFFFF')
+    section_fill = PatternFill('solid', fgColor='305496')
+    total_font = Font(bold=True)
+    total_fill = PatternFill('solid', fgColor='D9E1F2')
+    header_font = Font(bold=True)
+    others_font = Font(italic=True)
+
+    ws.cell(row=1, column=1, value='QUARTERLY TRENDS — US Online Sports Betting').font = title_font
+    ws.cell(row=2, column=1, value=(
+        'Formula-driven. Y/Y is Like-for-Like: each quarter compares only the '
+        'months/states reported so far against the identical slice one year '
+        'earlier (Σ monthly numerators / Σ denominators). * = quarter still '
+        'reporting (quarter-to-date). Handle/GGR in $.'
+    )).font = Font(italic=True, color='595959')
+
+    row_labels = list(brands) + ['Others', 'Total']
+
+    def write_header(hr, title):
+        hc = ws.cell(row=hr, column=1, value=title)
+        hc.font = section_font
+        hc.fill = section_fill
+        for c_idx, qs in enumerate(shown, start=2):
+            lbl = _quarter_label(qs) + ('*' if not complete(qs) else '')
+            cc = ws.cell(row=hr, column=c_idx, value=lbl)
+            cc.font = section_font
+            cc.fill = section_fill
+            cc.alignment = Alignment(horizontal='center')
+
+    def style_label(r, brand):
+        is_total = brand == 'Total'
+        lc = ws.cell(row=r, column=1, value=brand)
+        lc.font = total_font if is_total else (
+            others_font if brand == 'Others' else header_font)
+        if is_total:
+            lc.fill = total_fill
+
+    def apply_cell_style(cell, brand):
+        if brand == 'Total':
+            cell.fill = total_fill
+            cell.font = total_font
+        elif brand == 'Others':
+            cell.font = others_font
+
+    # Section positions (so Hold can divide GGR by Handle).
+    handle_hdr = 4
+    ggr_hdr = handle_hdr + len(row_labels) + 3
+    hyoy_hdr = ggr_hdr + len(row_labels) + 3
+    gyoy_hdr = hyoy_hdr + len(row_labels) + 3
+    hold_hdr = gyoy_hdr + len(row_labels) + 3
+
+    for hdr, title, kind in [
+        (handle_hdr, 'HANDLE ($)', ('level', 'Handle')),
+        (ggr_hdr, 'GGR ($)', ('level', 'GGR')),
+        (hyoy_hdr, 'HANDLE % Y/Y', ('yoy', handle_panel)),
+        (gyoy_hdr, 'GGR % Y/Y', ('yoy', ggr_panel)),
+        (hold_hdr, 'HOLD %', ('hold', None)),
+    ]:
+        write_header(hdr, title)
+        for r_idx, brand in enumerate(row_labels):
+            r = hdr + 1 + r_idx
+            style_label(r, brand)
+            for c_idx, qs in enumerate(shown, start=2):
+                cell = ws.cell(row=r, column=c_idx)
+                apply_cell_style(cell, brand)
+                if kind[0] == 'level':
+                    cell.value = level_formula(kind[1], brand, qs)
+                    cell.number_format = '#,##0'
+                elif kind[0] == 'yoy':
+                    f = yoy_formula(kind[1], brand, qs, r)
+                    if f is not None:
+                        cell.value = f
+                        cell.number_format = '0%'
+                else:  # hold = GGR / Handle for the same brand/quarter
+                    col = _col_letter(c_idx)
+                    gr = ggr_hdr + 1 + r_idx
+                    hr_ = handle_hdr + 1 + r_idx
+                    cell.value = f'=IFERROR({col}{gr}/{col}{hr_},"")'
+                    cell.number_format = '0.0%'
+
+    ws.column_dimensions['A'].width = 13
+    for c_idx in range(2, len(shown) + 2):
+        ws.column_dimensions[_col_letter(c_idx)].width = 14
+    ws.freeze_panes = 'B5'
+
+
+def build_workbook(raw: pd.DataFrame, out_path, values_in_cents: bool = True):
+    """Assemble the full operator workbook from a per-operator-month frame.
+
+    `raw` must carry columns: state_code, operator_standard, parent_company,
+    period_start, handle, standard_ggr. `values_in_cents` divides handle/GGR by
+    100 for the integer-cents CSV pipeline; the OSBdata API already serves
+    dollars, so callers sourcing from it pass values_in_cents=False.
+    """
     # Bucket mapping — anything not in the 6 named brands → Others.
+    raw = raw.copy()
     raw['bucket'] = raw['operator_standard'].apply(_bucket)
 
     # Aggregate to (state, bucket, period_start) so the analytical sheets see one
@@ -396,9 +807,11 @@ def main():
         raw.groupby(['state_code', 'bucket', 'period_start'], as_index=False)
         .agg(handle=('handle', 'sum'), ggr=('standard_ggr', 'sum'))
     )
-    # Pipeline stores money as integer cents — convert to dollars for the output.
-    grouped['handle'] = grouped['handle'] / 100.0
-    grouped['ggr'] = grouped['ggr'] / 100.0
+    # The CSV pipeline stores money as integer cents — convert to dollars for
+    # the output. API-sourced callers already have dollars and skip this.
+    if values_in_cents:
+        grouped['handle'] = grouped['handle'] / 100.0
+        grouped['ggr'] = grouped['ggr'] / 100.0
     grouped['parent_company'] = grouped.apply(
         lambda r: parent_map.get((r['state_code'], r['bucket']), ''), axis=1
     )
@@ -447,7 +860,10 @@ def main():
             'GGR DEFINITION: standard_ggr = handle − payouts. Normalized across states.',
             'HOLD: GGR / Handle, computed at the bucket level.',
             'MARKET SHARE: bucket / state-month total. States that did not publish a given month are excluded from that month\'s denominator — see Coverage sheet.',
-            'Y/Y GROWTH: current month / same month prior year − 1. Cells before the first available prior-year month are blank.',
+            'Y/Y GROWTH (Reported basis): current month / same month prior year − 1, using each month AS-REPORTED. When the two months have different state coverage (e.g. a state lags this year), the growth rate is distorted. Cells before the first available prior-year month are blank.',
+            'Y/Y GROWTH (Like-for-Like): the primary Y/Y. Numerator = ALL states that reported the CURRENT month; denominator = those SAME states one year earlier. A state that reported last year but is still lagging this year is dropped from BOTH sides (removes the coverage-lag distortion). A genuinely NEW state (no prior-year data) is kept in the numerator and contributes 0 to the denominator — so numerator state-count ≥ denominator state-count, and real market expansion from new states still shows as growth. Driven by SUMPRODUCT over the Handle/GGR by State panels, gated on ISNUMBER of the current-month column.',
+            'BY-STATE PANELS: Handle by State / GGR by State pivot Raw Data to brand-subtotal + collapsible state rows × month. Blank = the state did not report that month (not zero). These are the SUMIFS/SUMPRODUCT source for the Like-for-Like Y/Y and support custom SUMIFS cuts.',
+            'QUARTERLY TRENDS: quarters as columns; Handle / GGR / Handle % Y/Y / GGR % Y/Y / Hold % stacked by brand + Total. Fully formula-driven: levels = SUM of the quarter\'s monthly cells on the Handle/GGR sheets; Y/Y = SUMPRODUCT over the by-state panels. The trailing still-reporting quarter IS shown, marked * (quarter-to-date). Quarterly Y/Y is Like-for-Like month- AND state-matched: (Σ over the quarter\'s reported months of each month\'s current-panel numerator) / (Σ of the same months\' prior-year denominators) − 1 — so a partial quarter compares only the slice reported so far against the identical slice a year earlier.',
             'DYNAMIC: All analytical sheets use SUMIFS / INDEX-MATCH formulas pointing at Raw Data. Re-running scripts/build_operator_excel.py rewrites Raw Data; the formulas recompute on Excel open.',
             'DATA-QUALITY CAVEATS:',
             '  WV: online operators are reported as casino-skin venue names (Greenbrier, Mountaineer, Mardi Gras), not the underlying sportsbook brand. All WV rows currently fall into "Others".',
@@ -462,13 +878,29 @@ def main():
     months_dt = sorted(grouped['period_start'].dt.to_pydatetime().tolist())
     months_dt = sorted(set(d.replace(day=1) for d in months_dt))
 
-    with pd.ExcelWriter(OUT_PATH, engine='openpyxl') as writer:
+    with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
         # Raw Data first (analytical sheets reference it).
         raw_data_out_excel = raw_data_out.copy()
         # Keep Month as a real datetime so SUMIFS by-date matching works.
         raw_data_out_excel.to_excel(writer, sheet_name='Raw Data', index=False)
 
         _write_analytics_sheets(writer, TARGET_BRANDS, months_dt)
+
+        panel_brands = TARGET_BRANDS + ['Others']
+        handle_panel = _write_by_state_panel(
+            writer, grouped, panel_brands, months_dt,
+            'Handle by State', 'HANDLE ($)', 'E')
+        ggr_panel = _write_by_state_panel(
+            writer, grouped, panel_brands, months_dt,
+            'GGR by State', 'GGR ($)', 'F')
+        _write_fair_yoy(writer, 'Handle YoY (Like-for-Like)', 'HANDLE Y/Y',
+                        handle_panel, panel_brands, months_dt)
+        _write_fair_yoy(writer, 'GGR YoY (Like-for-Like)', 'GGR Y/Y',
+                        ggr_panel, panel_brands, months_dt)
+
+        _write_quarterly_trends(writer, months_dt, handle_panel, ggr_panel,
+                                TARGET_BRANDS, grouped)
+
         _write_coverage_matrix(writer, grouped, months_dt)
 
         sources.to_excel(writer, sheet_name='Sources', index=False)
@@ -477,7 +909,11 @@ def main():
         # Reorder: Handle / GGR / Hold / Handle Growth / GGR Growth / Raw Data / Coverage / Sources / Methodology
         wb = writer.book
         desired = [
-            'Handle', 'GGR', 'Hold Rate', 'Handle Growth YoY', 'GGR Growth YoY',
+            'Handle', 'GGR', 'Hold Rate',
+            'Handle YoY (Like-for-Like)', 'GGR YoY (Like-for-Like)',
+            'Quarterly Trends',
+            'Handle Growth YoY', 'GGR Growth YoY',
+            'Handle by State', 'GGR by State',
             'Raw Data', 'Coverage', 'Sources', 'Methodology',
         ]
         # openpyxl orders by creation; rearrange via sheet index moves.
@@ -516,10 +952,16 @@ def main():
 
     n_states = grouped['state_code'].nunique()
     n_buckets = grouped['bucket'].nunique()
-    print(f'Wrote {OUT_PATH}')
+    print(f'Wrote {out_path}')
     print(f'Raw Data rows: {len(raw_data_out)}')
     print(f'States: {n_states}, Buckets: {n_buckets}, Months: {len(months_dt)}')
     print(f'Range: {months_dt[0].strftime("%Y-%m")} to {months_dt[-1].strftime("%Y-%m")}')
+
+
+def main():
+    frames = [load_state(st) for st in OPERATOR_STATES]
+    raw = pd.concat(frames, ignore_index=True)
+    build_workbook(raw, OUT_PATH, values_in_cents=True)
 
 
 if __name__ == '__main__':
