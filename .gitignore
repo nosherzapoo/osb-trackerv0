@@ -9,3 +9,6 @@ logs/
 dashboard/dist/
 research/screenshots/
 data/processed/*.csv.bak
+
+# Separate nested project with its own git repo + secrets — never include here
+polymarket-backtester/
